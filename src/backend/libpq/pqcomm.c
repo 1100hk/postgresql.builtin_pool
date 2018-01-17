@@ -1029,6 +1029,18 @@ pq_peekbyte(void)
 }
 
 /* --------------------------------
+ *		pq_peekbyte		- peek at next byte from connection
+ *
+ *	 Same as pq_getbyte() except we don't advance the pointer.
+ * --------------------------------
+ */
+int
+pq_available_bytes(void)
+{
+	return PqRecvLength - PqRecvPointer;
+}
+
+/* --------------------------------
  *		pq_getbyte_if_available - get a single byte from connection,
  *			if available
  *

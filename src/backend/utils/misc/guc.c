@@ -1871,6 +1871,26 @@ static struct config_int ConfigureNamesInt[] =
 	},
 
 	{
+		{"max_sessions", PGC_POSTMASTER, CONN_AUTH_SETTINGS,
+			gettext_noop("Sets the maximum number of client session."),
+			NULL
+		},
+		&MaxSessions,
+		1000, 1, INT_MAX,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"session_pool_size", PGC_POSTMASTER, CONN_AUTH_SETTINGS,
+			gettext_noop("Sets number of backends serving client sessions."),
+			NULL
+		},
+		&SessionPoolSize,
+		0, 0, INT_MAX,
+		NULL, NULL, NULL
+	},
+
+	{
 		{"superuser_reserved_connections", PGC_POSTMASTER, CONN_AUTH_SETTINGS,
 			gettext_noop("Sets the number of connection slots reserved for superusers."),
 			NULL

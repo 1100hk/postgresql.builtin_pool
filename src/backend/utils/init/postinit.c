@@ -65,7 +65,7 @@
 
 static HeapTuple GetDatabaseTuple(const char *dbname);
 static HeapTuple GetDatabaseTupleByOid(Oid dboid);
-static void PerformAuthentication(Port *port);
+void PerformAuthentication(Port *port);
 static void CheckMyDatabase(const char *name, bool am_superuser);
 static void InitCommunication(void);
 static void ShutdownPostgres(int code, Datum arg);
@@ -180,7 +180,7 @@ GetDatabaseTupleByOid(Oid dboid)
  *
  * returns: nothing.  Will not return at all if there's any failure.
  */
-static void
+void
 PerformAuthentication(Port *port)
 {
 	/* This should be set already, but let's make sure */

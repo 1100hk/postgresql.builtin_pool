@@ -169,6 +169,7 @@ typedef struct bkend
 	pid_t		pid;			/* process id of backend */
 	int32		cancel_key;		/* cancel key for cancels for this backend */
 	int			child_slot;		/* PMChildSlot for this backend, if any */
+	pgsocket    session_send_sock;  /* Write end of socket pipe to this backend used to send session socket descriptor to the backend process */
 
 	/*
 	 * Flavor of backend or auxiliary process.  Note that BACKEND_TYPE_WALSND
@@ -182,6 +183,15 @@ typedef struct bkend
 } Backend;
 
 static dlist_head BackendList = DLIST_STATIC_INIT(BackendList);
+/*
+ * Pointer in backend list used to implement round-robin distribution of sessions through backends.
+ * This variable either NULL, either points to the normal backend. 
+ */
+static Backend*   BackendListClockPtr;
+/*
+ * Number of active normal backends
+ */
+static int        nNormalBackends;
 
 #ifdef EXEC_BACKEND
 static Backend *ShmemBackendArray;
@@ -412,7 +422,6 @@ static void BackendRun(Port *port) pg_attribute_noreturn();
 static void ExitPostmaster(int status) pg_attribute_noreturn();
 static int	ServerLoop(void);
 static int	BackendStartup(Port *port);
-static int	ProcessStartupPacket(Port *port, bool SSLdone);
 static void SendNegotiateProtocolVersion(List *unrecognized_protocol_options);
 static void processCancelRequest(Port *port, void *pkt);
 static int	initMasks(fd_set *rmask);
@@ -566,6 +575,22 @@ int			postmaster_alive_fds[2] = {-1, -1};
 /* Process handle of postmaster used for the same purpose on Windows */
 HANDLE		PostmasterHandle;
 #endif
+
+/*
+ * Move current backend pointer to the next normal backend.
+ * This function is called either when new session is started to implement round-robin policy, either when backend pointer by BackendListClockPtr is terminated 
+ */
+static void AdvanceBackendListClockPtr(void)
+{
+	Backend* b = BackendListClockPtr;
+	do {
+		dlist_node* node = &b->elem;
+		node = node->next ? node->next : BackendList.head.next;
+		b = dlist_container(Backend, elem, node);
+	} while (b->bkend_type != BACKEND_TYPE_NORMAL && b != BackendListClockPtr);
+
+	BackendListClockPtr = (b != BackendListClockPtr) ? b : NULL;
+}
 
 /*
  * Postmaster main entry point
@@ -1944,8 +1969,8 @@ initMasks(fd_set *rmask)
  * send anything to the client, which would typically be appropriate
  * if we detect a communications failure.)
  */
-static int
-ProcessStartupPacket(Port *port, bool SSLdone)
+int
+ProcessStartupPacket(Port *port, bool SSLdone, MemoryContext memctx)
 {
 	int32		len;
 	void	   *buf;
@@ -2043,7 +2068,7 @@ retry1:
 #endif
 		/* regular startup packet, cancel, etc packet should follow... */
 		/* but not another SSL negotiation request */
-		return ProcessStartupPacket(port, true);
+		return ProcessStartupPacket(port, true, memctx);
 	}
 
 	/* Could add additional special packet types here */
@@ -2073,7 +2098,7 @@ retry1:
 	 * not worry about leaking this storage on failure, since we aren't in the
 	 * postmaster process anymore.
 	 */
-	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+	oldcontext = MemoryContextSwitchTo(memctx);
 
 	if (PG_PROTOCOL_MAJOR(proto) >= 3)
 	{
@@ -2449,7 +2474,7 @@ ConnCreate(int serverFd)
 		ConnFree(port);
 		return NULL;
 	}
-
+	port->session_recv_sock = PGINVALID_SOCKET;
 	/*
 	 * Allocate GSSAPI specific state struct
 	 */
@@ -3236,6 +3261,24 @@ CleanupBackgroundWorker(int pid,
 }
 
 /*
+ * Unlink backend from backend's list and free memory
+ */
+static void UnlinkBackend(Backend* bp)
+{
+	if (bp->bkend_type == BACKEND_TYPE_NORMAL)
+	{
+		if (bp == BackendListClockPtr)
+			AdvanceBackendListClockPtr();
+		if (bp->session_send_sock != PGINVALID_SOCKET)
+			close(bp->session_send_sock);
+		elog(DEBUG2, "Cleanup backend %d", bp->pid);
+		nNormalBackends -= 1;
+	}
+	dlist_delete(&bp->elem);
+	free(bp);
+}
+
+/*
  * CleanupBackend -- cleanup after terminated backend.
  *
  * Remove all local state associated with backend.
@@ -3312,8 +3355,7 @@ CleanupBackend(int pid,
 				 */
 				BackgroundWorkerStopNotifications(bp->pid);
 			}
-			dlist_delete(iter.cur);
-			free(bp);
+			UnlinkBackend(bp);
 			break;
 		}
 	}
@@ -3415,8 +3457,7 @@ HandleChildCrash(int pid, int exitstatus, const char *procname)
 				ShmemBackendArrayRemove(bp);
 #endif
 			}
-			dlist_delete(iter.cur);
-			free(bp);
+			UnlinkBackend(bp);
 			/* Keep looping so we can signal remaining backends */
 		}
 		else
@@ -4017,6 +4058,19 @@ BackendStartup(Port *port)
 {
 	Backend    *bn;				/* for backend cleanup */
 	pid_t		pid;
+	int         session_pipe[2];
+
+	if (SessionPoolSize != 0 && nNormalBackends >= SessionPoolSize)
+	{
+		/* Instead of spawning new backend open new session at one of the existed backends. */
+		Assert(BackendListClockPtr && BackendListClockPtr->session_send_sock != PGINVALID_SOCKET);
+		elog(DEBUG2, "Start new session for socket %d at backend %d total %d", port->sock, BackendListClockPtr->pid, nNormalBackends);
+		if (pg_send_sock(BackendListClockPtr->session_send_sock, port->sock) < 0)
+			elog(FATAL, "Failed to send session socket: %m");
+		AdvanceBackendListClockPtr(); /* round-robin */
+		return STATUS_OK;
+	}
+
 
 	/*
 	 * Create backend data structure.  Better before the fork() so we can
@@ -4030,7 +4084,6 @@ BackendStartup(Port *port)
 				 errmsg("out of memory")));
 		return STATUS_ERROR;
 	}
-
 	/*
 	 * Compute the cancel key that will be assigned to this backend. The
 	 * backend will have its own copy in the forked-off process' value of
@@ -4063,12 +4116,23 @@ BackendStartup(Port *port)
 	/* Hasn't asked to be notified about any bgworkers yet */
 	bn->bgworker_notify = false;
 
+	if (SessionPoolSize != 0)
+		if (socketpair(AF_UNIX, SOCK_DGRAM, 0, session_pipe) < 0)
+			ereport(FATAL,
+					(errcode_for_file_access(),
+					 errmsg_internal("could not create socket pair for launching sessions: %m")));
+
 #ifdef EXEC_BACKEND
 	pid = backend_forkexec(port);
 #else							/* !EXEC_BACKEND */
 	pid = fork_process();
 	if (pid == 0)				/* child */
 	{
+		if (SessionPoolSize != 0)
+		{
+			port->session_recv_sock = session_pipe[0];
+			close(session_pipe[1]);
+		}
 		free(bn);
 
 		/* Detangle from postmaster */
@@ -4082,6 +4146,7 @@ BackendStartup(Port *port)
 
 		/* And run the backend */
 		BackendRun(port);
+		Assert(false);
 	}
 #endif							/* EXEC_BACKEND */
 
@@ -4110,9 +4175,19 @@ BackendStartup(Port *port)
 	 * of backends.
 	 */
 	bn->pid = pid;
+	if (SessionPoolSize != 0)
+	{
+		bn->session_send_sock = session_pipe[1];
+		close(session_pipe[0]);
+	}
+	else
+		bn->session_send_sock = PGINVALID_SOCKET;
 	bn->bkend_type = BACKEND_TYPE_NORMAL;	/* Can change later to WALSND */
 	dlist_push_head(&BackendList, &bn->elem);
-
+	if (BackendListClockPtr == NULL)
+		BackendListClockPtr = bn;
+	nNormalBackends += 1;
+	elog(DEBUG2, "Start backend %d total %d", pid, nNormalBackends);
 #ifdef EXEC_BACKEND
 	if (!bn->dead_end)
 		ShmemBackendArrayAdd(bn);
@@ -4299,7 +4374,7 @@ BackendInitialize(Port *port)
 	 * Receive the startup packet (which might turn out to be a cancel request
 	 * packet).
 	 */
-	status = ProcessStartupPacket(port, false);
+	status = ProcessStartupPacket(port, false, TopMemoryContext);
 
 	/*
 	 * Stop here if it was bad or a cancel packet.  ProcessStartupPacket
@@ -6461,14 +6536,14 @@ InitPostmasterDeathWatchHandle(void)
 				(errcode_for_file_access(),
 				 errmsg_internal("could not create pipe to monitor postmaster death: %m")));
 
-	/*
-	 * Set O_NONBLOCK to allow testing for the fd's presence with a read()
-	 * call.
-	 */
-	if (fcntl(postmaster_alive_fds[POSTMASTER_FD_WATCH], F_SETFL, O_NONBLOCK) == -1)
-		ereport(FATAL,
-				(errcode_for_socket_access(),
-				 errmsg_internal("could not set postmaster death monitoring pipe to nonblocking mode: %m")));
+       /*
+        * Set O_NONBLOCK to allow testing for the fd's presence with a read()
+        * call.
+        */
+       if (fcntl(postmaster_alive_fds[POSTMASTER_FD_WATCH], F_SETFL, O_NONBLOCK) == -1)
+               ereport(FATAL,
+                               (errcode_for_socket_access(),
+                                errmsg_internal("could not set postmaster death monitoring pipe to nonblocking mode: %m")));
 #else
 
 	/*

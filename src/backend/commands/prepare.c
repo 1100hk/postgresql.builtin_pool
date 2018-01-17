@@ -782,6 +782,7 @@ pg_prepared_statement(PG_FUNCTION_ARGS)
 		}
 	}
 
+
 	/* clean up and return the tuplestore */
 	tuplestore_donestoring(tupstore);
 
@@ -812,4 +813,31 @@ build_regtype_array(Oid *param_types, int num_params)
 	/* XXX: this hardcodes assumptions about the regtype type */
 	result = construct_array(tmp_ary, num_params, REGTYPEOID, 4, true, 'i');
 	return PointerGetDatum(result);
+}
+
+
+void
+DropSessionPreparedStatements(char const* sessionId)
+{
+	HASH_SEQ_STATUS seq;
+	PreparedStatement *entry;
+	size_t idLen = strlen(sessionId);
+
+	/* nothing cached */
+	if (!prepared_queries)
+		return;
+
+	/* walk over cache */
+	hash_seq_init(&seq, prepared_queries);
+	while ((entry = hash_seq_search(&seq)) != NULL)
+	{
+		if (strncmp(entry->stmt_name, sessionId, idLen) == 0 && entry->stmt_name[idLen] == '.')
+		{
+			/* Release the plancache entry */
+			DropCachedPlan(entry->plansource);
+
+			/* Now we can remove the hash table entry */
+			hash_search(prepared_queries, entry->stmt_name, HASH_REMOVE, NULL);
+		}
+	}
 }

@@ -127,7 +127,8 @@ typedef struct Port
 	int			remote_hostname_errcode;	/* see above */
 	char	   *remote_port;	/* text rep of remote port */
 	CAC_state	canAcceptConnections;	/* postmaster connection status */
-
+	pgsocket    session_recv_sock;   /* socket for receiving descriptor of new session sockets */
+	
 	/*
 	 * Information that needs to be saved from the startup packet and passed
 	 * into backend execution.  "char *" fields are NULL if not set.

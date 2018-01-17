@@ -76,6 +76,7 @@ struct WaitEventSet
 {
 	int			nevents;		/* number of registered events */
 	int			nevents_space;	/* maximum number of events in this set */
+	int         free_events;    /* L1-list of free events linked by "pos" and terminated by -1*/
 
 	/*
 	 * Array, of nevents_space length, storing the definition of events this
@@ -129,7 +130,7 @@ static void drainSelfPipe(void);
 #if defined(WAIT_USE_EPOLL)
 static void WaitEventAdjustEpoll(WaitEventSet *set, WaitEvent *event, int action);
 #elif defined(WAIT_USE_POLL)
-static void WaitEventAdjustPoll(WaitEventSet *set, WaitEvent *event);
+static void WaitEventAdjustPoll(WaitEventSet *set, WaitEvent *event, bool remove);
 #elif defined(WAIT_USE_WIN32)
 static void WaitEventAdjustWin32(WaitEventSet *set, WaitEvent *event);
 #endif
@@ -562,6 +563,7 @@ CreateWaitEventSet(MemoryContext context, int nevents)
 
 	set->latch = NULL;
 	set->nevents_space = nevents;
+	set->free_events = -1;
 
 #if defined(WAIT_USE_EPOLL)
 #ifdef EPOLL_CLOEXEC
@@ -667,6 +669,7 @@ AddWaitEventToSet(WaitEventSet *set, uint32 events, pgsocket fd, Latch *latch,
 				  void *user_data)
 {
 	WaitEvent  *event;
+	int free_event;
 
 	/* not enough space */
 	Assert(set->nevents < set->nevents_space);
@@ -690,8 +693,19 @@ AddWaitEventToSet(WaitEventSet *set, uint32 events, pgsocket fd, Latch *latch,
 	if (fd == PGINVALID_SOCKET && (events & WL_SOCKET_MASK))
 		elog(ERROR, "cannot wait on socket event without a socket");
 
-	event = &set->events[set->nevents];
-	event->pos = set->nevents++;
+	free_event = set->free_events;
+	if (free_event >= 0)
+	{
+		event = &set->events[free_event];
+		set->free_events = event->pos;
+		event->pos = free_event;
+	}
+	else
+	{
+		event = &set->events[set->nevents];
+		event->pos = set->nevents;
+	}
+	set->nevents += 1;
 	event->fd = fd;
 	event->events = events;
 	event->user_data = user_data;
@@ -718,12 +732,33 @@ AddWaitEventToSet(WaitEventSet *set, uint32 events, pgsocket fd, Latch *latch,
 #if defined(WAIT_USE_EPOLL)
 	WaitEventAdjustEpoll(set, event, EPOLL_CTL_ADD);
 #elif defined(WAIT_USE_POLL)
-	WaitEventAdjustPoll(set, event);
+	WaitEventAdjustPoll(set, event, false);
 #elif defined(WAIT_USE_WIN32)
 	WaitEventAdjustWin32(set, event);
 #endif
 
 	return event->pos;
+}
+
+/*
+ * Remove event with specified socket descriptor
+ */
+void DeleteWaitEventFromSet(WaitEventSet *set, pgsocket fd)
+{
+	int i, n = set->nevents;
+	for (i = 0; i < n; i++)
+	{
+		WaitEvent  *event = &set->events[i];
+		if (event->fd == fd)
+		{
+#if defined(WAIT_USE_EPOLL)
+			WaitEventAdjustEpoll(set, event, EPOLL_CTL_DEL);
+#elif defined(WAIT_USE_POLL)
+			WaitEventAdjustPoll(set, event, true);
+#endif
+			break;
+		}
+	}
 }
 
 /*
@@ -774,7 +809,7 @@ ModifyWaitEvent(WaitEventSet *set, int pos, uint32 events, Latch *latch)
 #if defined(WAIT_USE_EPOLL)
 	WaitEventAdjustEpoll(set, event, EPOLL_CTL_MOD);
 #elif defined(WAIT_USE_POLL)
-	WaitEventAdjustPoll(set, event);
+	WaitEventAdjustPoll(set, event, false);
 #elif defined(WAIT_USE_WIN32)
 	WaitEventAdjustWin32(set, event);
 #endif
@@ -827,14 +862,33 @@ WaitEventAdjustEpoll(WaitEventSet *set, WaitEvent *event, int action)
 		ereport(ERROR,
 				(errcode_for_socket_access(),
 				 errmsg("epoll_ctl() failed: %m")));
+
+	if (action == EPOLL_CTL_DEL)
+	{
+		int pos = event->pos;
+		event->fd = PGINVALID_SOCKET;
+		set->nevents -= 1;
+		event->pos = set->free_events;
+		set->free_events = pos;
+	}
 }
 #endif
 
 #if defined(WAIT_USE_POLL)
 static void
-WaitEventAdjustPoll(WaitEventSet *set, WaitEvent *event)
+WaitEventAdjustPoll(WaitEventSet *set, WaitEvent *event, bool remove)
 {
-	struct pollfd *pollfd = &set->pollfds[event->pos];
+	int pos = event->pos;
+	struct pollfd *pollfd = &set->pollfds[pos];
+
+	if (remove)
+	{
+		set->nevents -= 1;
+		*pollfd = set->pollfds[set->nevents];
+		set->events[pos] = set->events[set->nevents];
+		event->pos = pos;
+		return;
+	}
 
 	pollfd->revents = 0;
 	pollfd->fd = event->fd;

@@ -120,7 +120,9 @@ int			maintenance_work_mem = 16384;
  * register background workers.
  */
 int			NBuffers = 1000;
+int         SessionPoolSize = 10;
 int			MaxConnections = 90;
+int			MaxSessions = 1000;
 int			max_worker_processes = 8;
 int			max_parallel_workers = 8;
 int			MaxBackends = 0;

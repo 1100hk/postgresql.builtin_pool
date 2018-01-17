@@ -157,6 +157,8 @@ extern PGDLLIMPORT char *DataDir;
 extern PGDLLIMPORT int NBuffers;
 extern PGDLLIMPORT int MaxBackends;
 extern PGDLLIMPORT int MaxConnections;
+extern PGDLLIMPORT int MaxSessions;
+extern PGDLLIMPORT int SessionPoolSize;
 extern PGDLLIMPORT int max_worker_processes;
 extern int	max_parallel_workers;
 
@@ -420,6 +422,7 @@ extern void InitializeMaxBackends(void);
 extern void InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 			 Oid useroid, char *out_dbname);
 extern void BaseInit(void);
+extern void PerformAuthentication(struct Port *port);
 
 /* in utils/init/miscinit.c */
 extern bool IgnoreSystemIndexes;

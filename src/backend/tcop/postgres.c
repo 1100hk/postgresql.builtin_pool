@@ -75,6 +75,7 @@
 #include "utils/snapmgr.h"
 #include "utils/timeout.h"
 #include "utils/timestamp.h"
+#include "utils/builtins.h"
 #include "mb/pg_wchar.h"
 
 
@@ -169,6 +170,10 @@ static ProcSignalReason RecoveryConflictReason;
 static MemoryContext row_description_context = NULL;
 static StringInfoData row_description_buf;
 
+static WaitEventSet* SessionPool;
+static int64         SessionCount;
+static char*         CurrentSessionId;
+
 /* ----------------------------------------------------------------
  *		decls for routines only used in this file
  * ----------------------------------------------------------------
@@ -194,6 +199,15 @@ static void log_disconnections(int code, Datum arg);
 static void enable_statement_timeout(void);
 static void disable_statement_timeout(void);
 
+/*
+ * Generate session ID unique within this backend
+ */
+static char* CreateSessionId(void)
+{
+	char buf[64];
+	pg_lltoa(++SessionCount, buf);
+	return strdup(buf);
+}
 
 /* ----------------------------------------------------------------
  *		routines to obtain user input
@@ -473,7 +487,8 @@ SocketBackend(StringInfo inBuf)
 			 * fatal because we have probably lost message boundary sync, and
 			 * there's no good way to recover.
 			 */
-			ereport(FATAL,
+		    Assert(false);
+		    ereport(FATAL,
 					(errcode(ERRCODE_PROTOCOL_VIOLATION),
 					 errmsg("invalid frontend message type %d", qtype)));
 			break;
@@ -1232,6 +1247,12 @@ exec_parse_message(const char *query_string,	/* string to execute */
 	bool		save_log_statement_stats = log_statement_stats;
 	char		msec_str[32];
 
+	if (CurrentSessionId && stmt_name[0] != '\0')
+	{
+		/* Make names of prepared statements unique for session in case of using internal session pool */
+		stmt_name = psprintf("%s.%s", CurrentSessionId, stmt_name);
+	}
+
 	/*
 	 * Report query to various monitoring facilities.
 	 */
@@ -1502,6 +1523,12 @@ exec_bind_message(StringInfo input_message)
 	/* Get the fixed part of the message */
 	portal_name = pq_getmsgstring(input_message);
 	stmt_name = pq_getmsgstring(input_message);
+
+	if (CurrentSessionId && stmt_name[0] != '\0')
+	{
+		/* Make names of prepared statements unique for session in case of using internal session pool */
+		stmt_name = psprintf("%s.%s", CurrentSessionId, stmt_name);
+	}
 
 	ereport(DEBUG2,
 			(errmsg("bind %s to %s",
@@ -2324,6 +2351,12 @@ exec_describe_statement_message(const char *stmt_name)
 {
 	CachedPlanSource *psrc;
 	int			i;
+
+	if (CurrentSessionId && stmt_name[0] != '\0')
+	{
+		/* Make names of prepared statements unique for session in case of using internal session pool */
+		stmt_name = psprintf("%s.%s", CurrentSessionId, stmt_name);
+	}
 
 	/*
 	 * Start up a transaction command. (Note that this will normally change
@@ -3603,7 +3636,6 @@ process_postgres_switches(int argc, char *argv[], GucContext ctx,
 #endif
 }
 
-
 /* ----------------------------------------------------------------
  * PostgresMain
  *	   postgres main loop -- all backends, interactive or otherwise start here
@@ -3653,6 +3685,10 @@ PostgresMain(int argc, char *argv[],
 					 errmsg("%s: no database nor user name specified",
 							progname)));
 	}
+
+	/* Assign session ID if use session pooling */
+	if (SessionPoolSize != 0)
+		CurrentSessionId = CreateSessionId();
 
 	/* Acquire configuration parameters, unless inherited from postmaster */
 	if (!IsUnderPostmaster)
@@ -3783,7 +3819,7 @@ PostgresMain(int argc, char *argv[],
 	 * ... else we'd need to copy the Port data first.  Also, subsidiary data
 	 * such as the username isn't lost either; see ProcessStartupPacket().
 	 */
-	if (PostmasterContext)
+	if (PostmasterContext && SessionPoolSize == 0)
 	{
 		MemoryContextDelete(PostmasterContext);
 		PostmasterContext = NULL;
@@ -4069,6 +4105,102 @@ PostgresMain(int argc, char *argv[],
 
 			ReadyForQuery(whereToSendOutput);
 			send_ready_for_query = false;
+
+			if (MyProcPort && MyProcPort->session_recv_sock != PGINVALID_SOCKET && !IsTransactionState() && pq_available_bytes() == 0)
+			{
+				WaitEvent ready_client;
+				whereToSendOutput = DestRemote;
+				if (SessionPool == NULL)
+				{
+					SessionPool = CreateWaitEventSet(TopMemoryContext, MaxSessions);
+					AddWaitEventToSet(SessionPool, WL_POSTMASTER_DEATH, PGINVALID_SOCKET, NULL, NULL);
+					AddWaitEventToSet(SessionPool, WL_LATCH_SET, PGINVALID_SOCKET, MyLatch, NULL);
+					AddWaitEventToSet(SessionPool, WL_SOCKET_READABLE, MyProcPort->session_recv_sock, NULL, NULL);
+					AddWaitEventToSet(SessionPool, WL_SOCKET_READABLE, MyProcPort->sock, NULL, NULL);
+				}
+			  Retry:
+				DoingCommandRead = true;
+				if (WaitEventSetWait(SessionPool, -1, &ready_client, 1, PG_WAIT_CLIENT) != 1)
+				{
+					/* TODO: do some error recovery here */
+					elog(FATAL, "Failed to poll client sessions");
+				}
+				CHECK_FOR_INTERRUPTS();
+				DoingCommandRead = false;
+
+				if (ready_client.events & WL_POSTMASTER_DEATH)
+					ereport(FATAL,
+							(errcode(ERRCODE_ADMIN_SHUTDOWN),
+							 errmsg("terminating connection due to unexpected postmaster exit")));
+
+				if (ready_client.events & WL_LATCH_SET)
+				{
+					ResetLatch(MyLatch);
+					ProcessClientReadInterrupt(true);
+					goto Retry;
+				}
+
+				if (ready_client.fd == MyProcPort->session_recv_sock)
+				{
+					int		 status;
+					Port     port;
+					Port*    myPort;
+					StringInfoData buf;
+					pgsocket sock = pg_recv_sock(MyProcPort->session_recv_sock);
+					if (sock < 0)
+						elog(FATAL, "Failed to receive session socket: %m");
+
+					/*
+					 * Receive the startup packet (which might turn out to be a cancel request
+					 * packet).
+					 */
+					port.sock = sock;
+					myPort = MyProcPort;
+					MyProcPort = &port;
+					status = ProcessStartupPacket(&port, false, MessageContext);
+					MyProcPort = myPort;
+					if (strcmp(port.database_name, MyProcPort->database_name) ||
+						strcmp(port.user_name, MyProcPort->user_name))
+					{
+						elog(FATAL, "Failed to open session (dbname=%s user=%s) in backend %d (dbname=%s user=%s)",
+							 port.database_name, port.user_name,
+							 MyProcPid, MyProcPort->database_name, MyProcPort->user_name);
+					}
+					else if (status == STATUS_OK)
+					{
+						elog(DEBUG2, "Start new session %d in backend %d for database %s user %s",
+							 sock, MyProcPid, port.database_name, port.user_name);
+						CurrentSessionId = CreateSessionId();
+						AddWaitEventToSet(SessionPool, WL_SOCKET_READABLE, sock, NULL, CurrentSessionId);
+						MyProcPort->sock = sock;
+						send_ready_for_query = true;
+
+						SetCurrentStatementStartTimestamp();
+						StartTransactionCommand();
+						PerformAuthentication(MyProcPort);
+						CommitTransactionCommand();
+
+						/*
+						 * Send this backend's cancellation info to the frontend.
+						 */
+						pq_beginmessage(&buf, 'K');
+						pq_sendint32(&buf, (int32) MyProcPid);
+						pq_sendint32(&buf, (int32) MyCancelKey);
+						pq_endmessage(&buf);
+						/* Need not flush since ReadyForQuery will do it. */
+						continue;
+					}
+					elog(LOG, "Session startup failed");
+					close(sock);
+					goto Retry;
+				}
+				else
+				{
+					elog(DEBUG2, "Switch to session %d in backend %d", ready_client.fd, MyProcPid);
+					MyProcPort->sock = ready_client.fd;
+					CurrentSessionId = (char*)ready_client.user_data;
+				}
+			}
 		}
 
 		/*
@@ -4350,13 +4482,33 @@ PostgresMain(int argc, char *argv[],
 				 * it will fail to be called during other backend-shutdown
 				 * scenarios.
 				 */
+				if (SessionPool)
+				{
+					DeleteWaitEventFromSet(SessionPool, MyProcPort->sock);
+					elog(DEBUG1, "Close session %d in backend %d", MyProcPort->sock, MyProcPid);
+					pq_getmsgend(&input_message);
+
+					if (CurrentSessionId)
+					{
+						DropSessionPreparedStatements(CurrentSessionId);
+						free(CurrentSessionId);
+						CurrentSessionId = NULL;
+					}
+
+					close(MyProcPort->sock);
+					MyProcPort->sock = PGINVALID_SOCKET;
+
+					send_ready_for_query = true;
+					break;
+				}
+				elog(DEBUG1, "Terminate backend %d", MyProcPid);
 				proc_exit(0);
 
 			case 'd':			/* copy data */
 			case 'c':			/* copy done */
 			case 'f':			/* copy fail */
 
-				/*
+				/*!
 				 * Accept but ignore these messages, per protocol spec; we
 				 * probably got here because a COPY failed, and the frontend
 				 * is still sending data.
@@ -4364,6 +4516,7 @@ PostgresMain(int argc, char *argv[],
 				break;
 
 			default:
+ 		        Assert(false);
 				ereport(FATAL,
 						(errcode(ERRCODE_PROTOCOL_VIOLATION),
 						 errmsg("invalid frontend message type %d",
