@@ -782,7 +782,6 @@ pg_prepared_statement(PG_FUNCTION_ARGS)
 		}
 	}
 
-
 	/* clean up and return the tuplestore */
 	tuplestore_donestoring(tupstore);
 

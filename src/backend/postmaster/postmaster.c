@@ -185,7 +185,7 @@ typedef struct bkend
 static dlist_head BackendList = DLIST_STATIC_INIT(BackendList);
 /*
  * Pointer in backend list used to implement round-robin distribution of sessions through backends.
- * This variable either NULL, either points to the normal backend. 
+ * This variable either NULL, either points to the normal backend.
  */
 static Backend*   BackendListClockPtr;
 /*
@@ -578,7 +578,7 @@ HANDLE		PostmasterHandle;
 
 /*
  * Move current backend pointer to the next normal backend.
- * This function is called either when new session is started to implement round-robin policy, either when backend pointer by BackendListClockPtr is terminated 
+ * This function is called either when new session is started to implement round-robin policy, either when backend pointer by BackendListClockPtr is terminated
  */
 static void AdvanceBackendListClockPtr(void)
 {
@@ -589,7 +589,7 @@ static void AdvanceBackendListClockPtr(void)
 		b = dlist_container(Backend, elem, node);
 	} while (b->bkend_type != BACKEND_TYPE_NORMAL && b != BackendListClockPtr);
 
-	BackendListClockPtr = (b != BackendListClockPtr) ? b : NULL;
+	BackendListClockPtr = b;
 }
 
 /*
@@ -2474,7 +2474,7 @@ ConnCreate(int serverFd)
 		ConnFree(port);
 		return NULL;
 	}
-	port->session_recv_sock = PGINVALID_SOCKET;
+	SessionPoolSock = PGINVALID_SOCKET;
 	/*
 	 * Allocate GSSAPI specific state struct
 	 */
@@ -4130,7 +4130,7 @@ BackendStartup(Port *port)
 	{
 		if (SessionPoolSize != 0)
 		{
-			port->session_recv_sock = session_pipe[0];
+			SessionPoolSock = session_pipe[0];
 			close(session_pipe[1]);
 		}
 		free(bn);
@@ -4146,7 +4146,6 @@ BackendStartup(Port *port)
 
 		/* And run the backend */
 		BackendRun(port);
-		Assert(false);
 	}
 #endif							/* EXEC_BACKEND */
 
@@ -6536,14 +6535,14 @@ InitPostmasterDeathWatchHandle(void)
 				(errcode_for_file_access(),
 				 errmsg_internal("could not create pipe to monitor postmaster death: %m")));
 
-       /*
-        * Set O_NONBLOCK to allow testing for the fd's presence with a read()
-        * call.
-        */
-       if (fcntl(postmaster_alive_fds[POSTMASTER_FD_WATCH], F_SETFL, O_NONBLOCK) == -1)
-               ereport(FATAL,
-                               (errcode_for_socket_access(),
-                                errmsg_internal("could not set postmaster death monitoring pipe to nonblocking mode: %m")));
+	/*
+	 * Set O_NONBLOCK to allow testing for the fd's presence with a read()
+	 * call.
+	 */
+	if (fcntl(postmaster_alive_fds[POSTMASTER_FD_WATCH], F_SETFL, O_NONBLOCK) == -1)
+		ereport(FATAL,
+				(errcode_for_socket_access(),
+				 errmsg_internal("could not set postmaster death monitoring pipe to nonblocking mode: %m")));
 #else
 
 	/*

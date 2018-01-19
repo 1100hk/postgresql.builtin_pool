@@ -2,7 +2,7 @@
  *
  * send_sock.c
  *	  Send socket descriptor to another process
- * 
+ *
  * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -24,7 +24,7 @@
 /*
  * Send socket descriptor "sock" to backend process through Unix socket "chan"
  */
-int pg_send_sock(pgsocket chan, pgsocket sock) 
+int pg_send_sock(pgsocket chan, pgsocket sock)
 {
     struct msghdr msg = { 0 };
 	struct iovec io;
@@ -60,7 +60,7 @@ int pg_send_sock(pgsocket chan, pgsocket sock)
 /*
  * Receive socket descriptor from postmaster process through Unix socket "chan"
  */
-pgsocket pg_recv_sock(pgsocket chan) 
+pgsocket pg_recv_sock(pgsocket chan)
 {
     struct msghdr msg = {0};
     char c_buffer[256];
