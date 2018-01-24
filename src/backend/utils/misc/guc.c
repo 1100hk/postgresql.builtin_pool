@@ -1873,7 +1873,8 @@ static struct config_int ConfigureNamesInt[] =
 	{
 		{"max_sessions", PGC_POSTMASTER, CONN_AUTH_SETTINGS,
 			gettext_noop("Sets the maximum number of client session."),
-			NULL
+			gettext_noop("Maximal number of client sessions which can be handled by one backend if session pooling is switched on. "
+						 "So maximal number of client connections is session_pool_size*max_sessions")
 		},
 		&MaxSessions,
 		1000, 1, INT_MAX,
@@ -1883,7 +1884,9 @@ static struct config_int ConfigureNamesInt[] =
 	{
 		{"session_pool_size", PGC_POSTMASTER, CONN_AUTH_SETTINGS,
 			gettext_noop("Sets number of backends serving client sessions."),
-			NULL
+			gettext_noop("If non-zero then session pooling will be used: "
+						 "client connections will be redirected to one of the backends and maximal number of backends is determined by this parameter."
+						 "Launched backend are never terminated even in case of no active sessions.")
 		},
 		&SessionPoolSize,
 		0, 0, INT_MAX,

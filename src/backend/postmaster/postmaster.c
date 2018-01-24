@@ -4062,12 +4062,13 @@ BackendStartup(Port *port)
 
 	if (SessionPoolSize != 0 && nNormalBackends >= SessionPoolSize)
 	{
-		/* Instead of spawning new backend open new session at one of the existed backends. */
+		/* In case of session pooling instead of spawning new backend open new session at one of the existed backends. */
 		Assert(BackendListClockPtr && BackendListClockPtr->session_send_sock != PGINVALID_SOCKET);
 		elog(DEBUG2, "Start new session for socket %d at backend %d total %d", port->sock, BackendListClockPtr->pid, nNormalBackends);
+		/* Send connection socket to the backend pointed by BackendListClockPtr */
 		if (pg_send_sock(BackendListClockPtr->session_send_sock, port->sock) < 0)
 			elog(FATAL, "Failed to send session socket: %m");
-		AdvanceBackendListClockPtr(); /* round-robin */
+		AdvanceBackendListClockPtr(); /* round-robin backends */
 		return STATUS_OK;
 	}
 
@@ -4116,6 +4117,7 @@ BackendStartup(Port *port)
 	/* Hasn't asked to be notified about any bgworkers yet */
 	bn->bgworker_notify = false;
 
+	/* Create socket pair for sending session sockets to the backend */
 	if (SessionPoolSize != 0)
 		if (socketpair(AF_UNIX, SOCK_DGRAM, 0, session_pipe) < 0)
 			ereport(FATAL,
@@ -4130,8 +4132,8 @@ BackendStartup(Port *port)
 	{
 		if (SessionPoolSize != 0)
 		{
-			SessionPoolSock = session_pipe[0];
-			close(session_pipe[1]);
+			SessionPoolSock = session_pipe[0]; /* Use this socket for receiving client session socket descriptor */
+			close(session_pipe[1]); /* Close unused end of the pipe */
 		}
 		free(bn);
 
@@ -4176,8 +4178,8 @@ BackendStartup(Port *port)
 	bn->pid = pid;
 	if (SessionPoolSize != 0)
 	{
-		bn->session_send_sock = session_pipe[1];
-		close(session_pipe[0]);
+		bn->session_send_sock = session_pipe[1]; /* Use this socket for sending client session socket descriptor */
+		close(session_pipe[0]); /* Close unused end of the pipe */
 	}
 	else
 		bn->session_send_sock = PGINVALID_SOCKET;

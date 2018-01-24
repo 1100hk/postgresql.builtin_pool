@@ -194,6 +194,7 @@ char	   *namespace_search_path = NULL;
 /* Local functions */
 static void recomputeNamespacePath(void);
 static void InitTempTableNamespace(void);
+static Oid  GetTempTableNamespace(void);
 static void RemoveTempRelations(Oid tempNamespaceId);
 static void RemoveTempRelationsCallback(int code, Datum arg);
 static void NamespaceCallback(Datum arg, int cacheid, uint32 hashvalue);
@@ -441,9 +442,7 @@ RangeVarGetCreationNamespace(const RangeVar *newRelation)
 		if (strcmp(newRelation->schemaname, "pg_temp") == 0)
 		{
 			/* Initialize temp namespace if first time through */
-			if (!OidIsValid(myTempNamespace))
-				InitTempTableNamespace();
-			return myTempNamespace;
+			return GetTempTableNamespace();
 		}
 		/* use exact schema given */
 		namespaceId = get_namespace_oid(newRelation->schemaname, false);
@@ -452,9 +451,7 @@ RangeVarGetCreationNamespace(const RangeVar *newRelation)
 	else if (newRelation->relpersistence == RELPERSISTENCE_TEMP)
 	{
 		/* Initialize temp namespace if first time through */
-		if (!OidIsValid(myTempNamespace))
-			InitTempTableNamespace();
-		return myTempNamespace;
+		return GetTempTableNamespace();
 	}
 	else
 	{
@@ -463,8 +460,7 @@ RangeVarGetCreationNamespace(const RangeVar *newRelation)
 		if (activeTempCreationPending)
 		{
 			/* Need to initialize temp namespace */
-			InitTempTableNamespace();
-			return myTempNamespace;
+			return GetTempTableNamespace();
 		}
 		namespaceId = activeCreationNamespace;
 		if (!OidIsValid(namespaceId))
@@ -2902,9 +2898,7 @@ LookupCreationNamespace(const char *nspname)
 	if (strcmp(nspname, "pg_temp") == 0)
 	{
 		/* Initialize temp namespace if first time through */
-		if (!OidIsValid(myTempNamespace))
-			InitTempTableNamespace();
-		return myTempNamespace;
+		return GetTempTableNamespace();
 	}
 
 	namespaceId = get_namespace_oid(nspname, false);
@@ -2967,9 +2961,7 @@ QualifiedNameGetCreationNamespace(List *names, char **objname_p)
 		if (strcmp(schemaname, "pg_temp") == 0)
 		{
 			/* Initialize temp namespace if first time through */
-			if (!OidIsValid(myTempNamespace))
-				InitTempTableNamespace();
-			return myTempNamespace;
+			return GetTempTableNamespace();
 		}
 		/* use exact schema given */
 		namespaceId = get_namespace_oid(schemaname, false);
@@ -2982,8 +2974,7 @@ QualifiedNameGetCreationNamespace(List *names, char **objname_p)
 		if (activeTempCreationPending)
 		{
 			/* Need to initialize temp namespace */
-			InitTempTableNamespace();
-			return myTempNamespace;
+			return GetTempTableNamespace();
 		}
 		namespaceId = activeCreationNamespace;
 		if (!OidIsValid(namespaceId))
@@ -3250,8 +3241,11 @@ void
 SetTempNamespaceState(Oid tempNamespaceId, Oid tempToastNamespaceId)
 {
 	/* Worker should not have created its own namespaces ... */
-	Assert(myTempNamespace == InvalidOid);
-	Assert(myTempToastNamespace == InvalidOid);
+	if (!ActiveSession)
+	{
+		Assert(myTempNamespace == InvalidOid);
+		Assert(myTempToastNamespace == InvalidOid);
+	}
 	Assert(myTempNamespaceSubID == InvalidSubTransactionId);
 
 	/* Assign same namespace OIDs that leader has */
@@ -3771,6 +3765,22 @@ recomputeNamespacePath(void)
 	list_free(oidlist);
 }
 
+static Oid
+GetTempTableNamespace(void)
+{
+	if (ActiveSession)
+	{
+		if (!OidIsValid(ActiveSession->tempNamespace))
+			InitTempTableNamespace();
+	}
+	else
+	{
+		if (!OidIsValid(myTempNamespace))
+			InitTempTableNamespace();
+	}
+	return myTempNamespace;
+}
+
 /*
  * InitTempTableNamespace
  *		Initialize temp table namespace on first use in a particular backend
@@ -3781,8 +3791,6 @@ InitTempTableNamespace(void)
 	char		namespaceName[NAMEDATALEN];
 	Oid			namespaceId;
 	Oid			toastspaceId;
-
-	Assert(!OidIsValid(myTempNamespace));
 
 	/*
 	 * First, do permission check to see if we are authorized to make temp
@@ -3822,7 +3830,10 @@ InitTempTableNamespace(void)
 				(errcode(ERRCODE_READ_ONLY_SQL_TRANSACTION),
 				 errmsg("cannot create temporary tables during a parallel operation")));
 
-	snprintf(namespaceName, sizeof(namespaceName), "pg_temp_%d", MyBackendId);
+	if (ActiveSession)
+		snprintf(namespaceName, sizeof(namespaceName), "pg_temp_%d_%s", MyBackendId, ActiveSession->id);
+	else
+		snprintf(namespaceName, sizeof(namespaceName), "pg_temp_%d", MyBackendId);
 
 	namespaceId = get_namespace_oid(namespaceName, true);
 	if (!OidIsValid(namespaceId))
@@ -3854,8 +3865,10 @@ InitTempTableNamespace(void)
 	 * it. (We assume there is no need to clean it out if it does exist, since
 	 * dropping a parent table should make its toast table go away.)
 	 */
-	snprintf(namespaceName, sizeof(namespaceName), "pg_toast_temp_%d",
-			 MyBackendId);
+	if (ActiveSession)
+		snprintf(namespaceName, sizeof(namespaceName), "pg_toast_temp_%d_%s", MyBackendId, ActiveSession->id);
+	else
+		snprintf(namespaceName, sizeof(namespaceName), "pg_toast_temp_%d", MyBackendId);
 
 	toastspaceId = get_namespace_oid(namespaceName, true);
 	if (!OidIsValid(toastspaceId))
@@ -3873,7 +3886,11 @@ InitTempTableNamespace(void)
 	 */
 	myTempNamespace = namespaceId;
 	myTempToastNamespace = toastspaceId;
-
+	if (ActiveSession)
+	{
+		ActiveSession->tempNamespace = namespaceId;
+		ActiveSession->tempToastNamespace = toastspaceId;
+	}
 	/* It should not be done already. */
 	AssertState(myTempNamespaceSubID == InvalidSubTransactionId);
 	myTempNamespaceSubID = GetCurrentSubTransactionId();

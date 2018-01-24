@@ -273,6 +273,21 @@ extern PGDLLIMPORT PROC_HDR *ProcGlobal;
 
 extern PGPROC *PreparedXactProcs;
 
+/*
+ * Information associated with client session
+ */
+typedef struct SessionContext
+{
+	MemoryContext memory; /* memory context used for global session data (replacement of TopMemoryContext) */
+	struct Port* port;           /* connection port */
+	char*        id;             /* session identifier used to construct unique prepared statement names */
+	Oid          tempNamespace;  /* temporary namespace */
+	Oid          tempToastNamespace;  /* temporary toast namespace */
+} SessionContext;
+
+
+extern PGDLLIMPORT SessionContext *ActiveSession; 
+
 /* Accessor for PGPROC given a pgprocno. */
 #define GetPGProcByNumber(n) (&ProcGlobal->allProcs[(n)])
 

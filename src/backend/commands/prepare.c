@@ -814,7 +814,9 @@ build_regtype_array(Oid *param_types, int num_params)
 	return PointerGetDatum(result);
 }
 
-
+/*
+ * Drop all statements prepared in the specified session.
+ */
 void
 DropSessionPreparedStatements(char const* sessionId)
 {

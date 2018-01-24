@@ -1029,9 +1029,8 @@ pq_peekbyte(void)
 }
 
 /* --------------------------------
- *		pq_peekbyte		- peek at next byte from connection
+ *		pq_available_bytes	- get number of buffered bytes available for reading.
  *
- *	 Same as pq_getbyte() except we don't advance the pointer.
  * --------------------------------
  */
 int

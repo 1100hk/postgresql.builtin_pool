@@ -78,14 +78,6 @@
 #include "utils/builtins.h"
 #include "mb/pg_wchar.h"
 
-
-typedef struct SessionContext
-{
-	MemoryContext memory;
-	Port* port;
-	char* id;
-} SessionContext;
-
 /* ----------------
  *		global variables
  * ----------------
@@ -106,8 +98,10 @@ int			max_stack_depth = 100;
 /* wait N seconds to allow attach from a debugger */
 int			PostAuthDelay = 0;
 
-/* Local socket for redirecting sessions to the backends */ 
+/* Local socket for redirecting sessions to the backends */
 pgsocket    SessionPoolSock = PGINVALID_SOCKET;
+/* Pointer to the active session */
+SessionContext* ActiveSession;
 
 
 /* ----------------
@@ -179,10 +173,11 @@ static ProcSignalReason RecoveryConflictReason;
 static MemoryContext row_description_context = NULL;
 static StringInfoData row_description_buf;
 
-static WaitEventSet*   SessionPool;
-static int64           SessionCount;
-static SessionContext* CurrentSession;
-static Port*           BackendPort;
+static WaitEventSet*   SessionPool;    /* Set of all sessions sockets */
+static int64           SessionCount;   /* Number of sessions */
+static Port*           BackendPort;    /* Reference to the original port of this backend created when this backend was launched.
+										* Session using this port may be already terminated, but since it is allocated in TopMemoryContext,
+										* its content is still valid and is used as template for ports of new sessions */
 
 /* ----------------------------------------------------------------
  *		decls for routines only used in this file
@@ -219,9 +214,12 @@ static char* CreateSessionId(void)
 	return pstrdup(buf);
 }
 
+/*
+ * Free all memory associated with session and delete session object itself
+ */
 static void DeleteSession(SessionContext* session)
 {
-	elog(LOG, "Delete session %p, id=%s,  memory context=%p", session, session->id, session->memory);
+	elog(DEBUG1, "Delete session %p, id=%s,  memory context=%p", session, session->id, session->memory);
 	MemoryContextDelete(session->memory);
 	free(session);
 }
@@ -1263,10 +1261,10 @@ exec_parse_message(const char *query_string,	/* string to execute */
 	bool		save_log_statement_stats = log_statement_stats;
 	char		msec_str[32];
 
-	if (CurrentSession && stmt_name[0] != '\0')
+	if (ActiveSession && stmt_name[0] != '\0')
 	{
 		/* Make names of prepared statements unique for session in case of using internal session pool */
-		stmt_name = psprintf("%s.%s", CurrentSession->id, stmt_name);
+		stmt_name = psprintf("%s.%s", ActiveSession->id, stmt_name);
 	}
 
 	/*
@@ -1540,10 +1538,10 @@ exec_bind_message(StringInfo input_message)
 	portal_name = pq_getmsgstring(input_message);
 	stmt_name = pq_getmsgstring(input_message);
 
-	if (CurrentSession && stmt_name[0] != '\0')
+	if (ActiveSession && stmt_name[0] != '\0')
 	{
 		/* Make names of prepared statements unique for session in case of using internal session pool */
-		stmt_name = psprintf("%s.%s", CurrentSession->id, stmt_name);
+		stmt_name = psprintf("%s.%s", ActiveSession->id, stmt_name);
 	}
 
 	ereport(DEBUG2,
@@ -2368,10 +2366,10 @@ exec_describe_statement_message(const char *stmt_name)
 	CachedPlanSource *psrc;
 	int			i;
 
-	if (CurrentSession && stmt_name[0] != '\0')
+	if (ActiveSession && stmt_name[0] != '\0')
 	{
 		/* Make names of prepared statements unique for session in case of using internal session pool */
-		stmt_name = psprintf("%s.%s", CurrentSession->id, stmt_name);
+		stmt_name = psprintf("%s.%s", ActiveSession->id, stmt_name);
 	}
 
 	/*
@@ -3702,17 +3700,17 @@ PostgresMain(int argc, char *argv[],
 							progname)));
 	}
 
-	/* Assign session ID if use session pooling */
+	/* Assign session for this backend in case of session pooling */
 	if (SessionPoolSize != 0)
 	{
 		MemoryContext oldcontext;
-		CurrentSession = (SessionContext*)malloc(sizeof(SessionContext));
-		CurrentSession->memory = AllocSetContextCreate(TopMemoryContext,
+		ActiveSession = (SessionContext*)calloc(1, sizeof(SessionContext));
+		ActiveSession->memory = AllocSetContextCreate(TopMemoryContext,
 													   "SessionMemoryContext",
 													   ALLOCSET_DEFAULT_SIZES);
-		oldcontext = MemoryContextSwitchTo(CurrentSession->memory);
-		CurrentSession->id = CreateSessionId();
-		CurrentSession->port = MyProcPort;
+		oldcontext = MemoryContextSwitchTo(ActiveSession->memory);
+		ActiveSession->id = CreateSessionId();
+		ActiveSession->port = MyProcPort;
 		BackendPort = MyProcPort;
 		MemoryContextSwitchTo(oldcontext);
 	}
@@ -4133,19 +4131,29 @@ PostgresMain(int argc, char *argv[],
 			ReadyForQuery(whereToSendOutput);
 			send_ready_for_query = false;
 
+			/*
+			 * Here we perform multiplexing of client sessions if session pooling is enabled.
+			 * As far as we perform transaction level pooling, rescheduling is done only when we are not in transaction.
+			 */
 			if (SessionPoolSock != PGINVALID_SOCKET && !IsTransactionState() && pq_available_bytes() == 0)
 			{
 				WaitEvent ready_client;
 				if (SessionPool == NULL)
 				{
+					/* Construct wait event set if not constructed yet */
 					SessionPool = CreateWaitEventSet(TopMemoryContext, MaxSessions);
-					AddWaitEventToSet(SessionPool, WL_POSTMASTER_DEATH, PGINVALID_SOCKET, NULL, CurrentSession);
-					AddWaitEventToSet(SessionPool, WL_LATCH_SET, PGINVALID_SOCKET, MyLatch, CurrentSession);
-					AddWaitEventToSet(SessionPool, WL_SOCKET_READABLE, SessionPoolSock, NULL, CurrentSession);
-					AddWaitEventToSet(SessionPool, WL_SOCKET_READABLE, MyProcPort->sock, NULL, CurrentSession);
+					/* Add event to detect postmaster death */
+					AddWaitEventToSet(SessionPool, WL_POSTMASTER_DEATH, PGINVALID_SOCKET, NULL, ActiveSession);
+					/* Add event for backends latch */
+					AddWaitEventToSet(SessionPool, WL_LATCH_SET, PGINVALID_SOCKET, MyLatch, ActiveSession);
+					/* Add event for accepting new sessions */
+					AddWaitEventToSet(SessionPool, WL_SOCKET_READABLE, SessionPoolSock, NULL, ActiveSession);
+					/* Add event for current session */
+					AddWaitEventToSet(SessionPool, WL_SOCKET_READABLE, MyProcPort->sock, NULL, ActiveSession);
 				}
 			  ChooseSession:
 				DoingCommandRead = true;
+				/* Select which client session is ready to send new query */ 
 				if (WaitEventSetWait(SessionPool, -1, &ready_client, 1, PG_WAIT_CLIENT) != 1)
 				{
 					/* TODO: do some error recovery here */
@@ -4168,6 +4176,7 @@ PostgresMain(int argc, char *argv[],
 
 				if (ready_client.fd == SessionPoolSock)
 				{
+					/* Here we handle case of attaching new session */ 
 					int		 status;
 					SessionContext* session;
 					StringInfoData buf;
@@ -4179,7 +4188,7 @@ PostgresMain(int argc, char *argv[],
 					if (sock < 0)
 						elog(FATAL, "Failed to receive session socket: %m");
 
-					session = (SessionContext*)malloc(sizeof(SessionContext));
+					session = (SessionContext*)calloc(1, sizeof(SessionContext));
 					session->memory = AllocSetContextCreate(TopMemoryContext,
 															"SessionMemoryContext",
 															ALLOCSET_DEFAULT_SIZES);
@@ -4199,6 +4208,10 @@ PostgresMain(int argc, char *argv[],
 					status = ProcessStartupPacket(port, false, session->memory);
 					MemoryContextSwitchTo(oldcontext);
 
+					/*
+					 * TODO: Currently we assume that all sessions are accessing the same database under the same user.
+					 * Just report an error if  it is not true
+					 */
 					if (strcmp(port->database_name, MyProcPort->database_name) ||
 						strcmp(port->user_name, MyProcPort->user_name))
 					{
@@ -4210,7 +4223,7 @@ PostgresMain(int argc, char *argv[],
 					{
 						elog(DEBUG2, "Start new session %d in backend %d for database %s user %s",
 							 sock, MyProcPid, port->database_name, port->user_name);
-						CurrentSession = session;
+						ActiveSession = session;
 						AddWaitEventToSet(SessionPool, WL_SOCKET_READABLE, sock, NULL, session);
 
 						SetCurrentStatementStartTimestamp();
@@ -4218,7 +4231,11 @@ PostgresMain(int argc, char *argv[],
 						PerformAuthentication(MyProcPort);
 						CommitTransactionCommand();
 
+						/*
+						 * Send GUC options to the client
+						 */
 						BeginReportingGUCOptions();
+
 						/*
 						 * Send this backend's cancellation info to the frontend.
 						 */
@@ -4233,6 +4250,9 @@ PostgresMain(int argc, char *argv[],
 					}
 					else
 					{
+						/* Error while processing of startup package
+						 * Reject this session and return back to listening sockets
+						 */
 						DeleteSession(session);
 						elog(LOG, "Session startup failed");
 						close(sock);
@@ -4242,8 +4262,9 @@ PostgresMain(int argc, char *argv[],
 				else
 				{
 					elog(DEBUG2, "Switch to session %d in backend %d", ready_client.fd, MyProcPid);
-					CurrentSession = (SessionContext*)ready_client.user_data;
-					MyProcPort = CurrentSession->port;
+					ActiveSession = (SessionContext*)ready_client.user_data;
+					MyProcPort = ActiveSession->port;
+					SetTempNamespaceState(ActiveSession->tempNamespace, ActiveSession->tempToastNamespace);
 				}
 			}
 		}
@@ -4527,8 +4548,17 @@ PostgresMain(int argc, char *argv[],
 				 * it will fail to be called during other backend-shutdown
 				 * scenarios.
 				 */
+
 				if (SessionPool)
 				{
+					/* In case of session pooling close the session, but do not terminate the backend
+					 * even if there are not more sessions in this backend.
+					 * The reason for keeping backend alive is to prevent redundant process launches if
+					 * some client repeatedly open/close connection to the database.
+					 * Maximal number of launched backends in case of connection pooling is intended to be
+					 * optimal for this system and workload, so there are no reasons to try to reduce this number
+					 * when there are no active sessions.
+					 */
 					DeleteWaitEventFromSet(SessionPool, MyProcPort->sock);
 					elog(DEBUG1, "Close session %d in backend %d", MyProcPort->sock, MyProcPid);
 
@@ -4540,13 +4570,14 @@ PostgresMain(int argc, char *argv[],
 					MyProcPort->sock = PGINVALID_SOCKET;
 					MyProcPort = NULL;
 
-					if (CurrentSession)
+					if (ActiveSession)
 					{
-						DropSessionPreparedStatements(CurrentSession->id);
-						DeleteSession(CurrentSession);
-						CurrentSession = NULL;
+						DropSessionPreparedStatements(ActiveSession->id);
+						DeleteSession(ActiveSession);
+						ActiveSession = NULL;
 					}
 					whereToSendOutput = DestRemote;
+					/* Need to perform rescheduling to some other session or accept new session */
 					goto ChooseSession;
 				}
 				elog(DEBUG1, "Terminate backend %d", MyProcPid);
