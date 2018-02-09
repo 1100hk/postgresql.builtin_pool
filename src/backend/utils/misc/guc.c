@@ -5127,6 +5127,95 @@ NewGUCNestLevel(void)
 }
 
 /*
+ * Set GUCs for this session
+ */
+void
+RestoreSessionGUCs(SessionContext* session)
+{
+	SessionGUC* sg;
+	if (session == NULL)
+		return;
+	for (sg = session->gucs; sg != NULL; sg = sg->next)
+	{
+		void* old_extra = sg->var->extra;
+		sg->var->extra = sg->val.extra;
+		switch (sg->var->vartype)
+		{
+		  case PGC_BOOL:
+		  {
+			  struct config_bool *conf = (struct config_bool*)sg->var;
+			  bool oldval = *conf->variable;
+			  *conf->variable = sg->val.val.boolval;
+			  if (conf->assign_hook)
+				  conf->assign_hook(sg->val.val.boolval, sg->val.extra);
+			  sg->val.val.boolval = oldval;
+			  break;
+		  }
+		  case PGC_INT:
+		  {
+			  struct config_int *conf = (struct config_int*)sg->var;
+			  int oldval = *conf->variable;
+			  *conf->variable = sg->val.val.intval;
+			  if (conf->assign_hook)
+				  conf->assign_hook(sg->val.val.intval, sg->val.extra);
+			  sg->val.val.intval = oldval;
+			  break;
+		  }
+		  case PGC_REAL:
+		  {
+			  struct config_real *conf = (struct config_real*)sg->var;
+			  double oldval = *conf->variable;
+			  *conf->variable = sg->val.val.realval;
+			  if (conf->assign_hook)
+				  conf->assign_hook(sg->val.val.realval, sg->val.extra);
+			  sg->val.val.realval = oldval;
+			  break;
+		  }
+		  case PGC_STRING:
+		  {
+			  struct config_string *conf = (struct config_string*)sg->var;
+			  char* oldval = *conf->variable;
+			  *conf->variable = sg->val.val.stringval;
+			  if (conf->assign_hook)
+				  conf->assign_hook(sg->val.val.stringval, sg->val.extra);
+			  sg->val.val.stringval = oldval;
+			  break;
+		  }
+		  case PGC_ENUM:
+		  {
+			  struct config_enum *conf = (struct config_enum*)sg->var;
+			  int oldval = *conf->variable;
+			  *conf->variable = sg->val.val.enumval;
+			  if (conf->assign_hook)
+				  conf->assign_hook(sg->val.val.enumval, sg->val.extra);
+			  sg->val.val.enumval = oldval;
+			  break;
+		  }
+		}
+		sg->val.extra = old_extra;
+	}
+}
+
+/*
+ * Deallocate memory for session GUCs
+ */
+void
+ReleaseSessionGUCs(SessionContext* session)
+{
+	SessionGUC* sg;
+	for (sg = session->gucs; sg != NULL; sg = sg->next)
+	{
+		if (sg->val.extra)
+			set_extra_field(sg->var, &sg->val.extra, NULL);
+		if (sg->var->vartype == PGC_STRING)
+		{
+			struct config_string* conf = (struct config_string*)sg->var;
+			set_string_field(conf, &sg->val.val.stringval, NULL);
+		}
+	}
+}
+
+/*
  * Do GUC processing at transaction or subtransaction commit or abort, or
  * when exiting a function that has proconfig settings, or when undoing a
  * transient assignment to some GUC variables.  (The name is thus a bit of
@@ -5195,7 +5284,42 @@ AtEOXact_GUC(bool isCommit, int nestLevel)
 				else if (stack->state == GUC_SET)
 				{
 					/* we keep the current active value */
-					discard_stack_value(gconf, &stack->prior);
+					if (ActiveSession)
+					{
+						SessionGUC* sg;
+						for (sg = ActiveSession->gucs; sg != NULL && sg->var != gconf; sg = sg->next);
+						if (sg == NULL)
+						{
+							sg = MemoryContextAllocZero(ActiveSession->memory,
+														sizeof(SessionGUC));
+							sg->var = gconf;
+							sg->next = ActiveSession->gucs;
+							ActiveSession->gucs = sg;
+						}
+						switch (gconf->vartype)
+						{
+						  case PGC_BOOL:
+							sg->val.val.boolval = stack->prior.val.boolval;
+							break;
+						  case PGC_INT:
+							sg->val.val.intval = stack->prior.val.intval;
+							break;
+						  case PGC_REAL:
+							sg->val.val.realval = stack->prior.val.realval;
+							break;
+						  case PGC_STRING:
+							sg->val.val.stringval = stack->prior.val.stringval;
+							break;
+						  case PGC_ENUM:
+							sg->val.val.enumval = stack->prior.val.enumval;
+							break;
+						}
+						sg->val.extra = stack->prior.extra;
+					}
+					else
+					{
+						discard_stack_value(gconf, &stack->prior);
+					}
 				}
 				else			/* must be GUC_LOCAL */
 					restorePrior = true;
@@ -5220,8 +5344,8 @@ AtEOXact_GUC(bool isCommit, int nestLevel)
 
 					case GUC_SET:
 						/* next level always becomes SET */
-						discard_stack_value(gconf, &stack->prior);
-						if (prev->state == GUC_SET_LOCAL)
+					    discard_stack_value(gconf, &stack->prior);
+					    if (prev->state == GUC_SET_LOCAL)
 							discard_stack_value(gconf, &prev->masked);
 						prev->state = GUC_SET;
 						break;

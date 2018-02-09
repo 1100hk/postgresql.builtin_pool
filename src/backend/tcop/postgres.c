@@ -40,6 +40,7 @@
 #include "access/printtup.h"
 #include "access/xact.h"
 #include "catalog/pg_type.h"
+#include "catalog/namespace.h"
 #include "commands/async.h"
 #include "commands/prepare.h"
 #include "libpq/libpq.h"
@@ -220,6 +221,8 @@ static char* CreateSessionId(void)
 static void DeleteSession(SessionContext* session)
 {
 	elog(DEBUG1, "Delete session %p, id=%s,  memory context=%p", session, session->id, session->memory);
+	RestoreSessionGUCs(session);
+	ReleaseSessionGUCs(session);
 	MemoryContextDelete(session->memory);
 	free(session);
 }
@@ -4223,6 +4226,7 @@ PostgresMain(int argc, char *argv[],
 					{
 						elog(DEBUG2, "Start new session %d in backend %d for database %s user %s",
 							 sock, MyProcPid, port->database_name, port->user_name);
+						RestoreSessionGUCs(ActiveSession);
 						ActiveSession = session;
 						AddWaitEventToSet(SessionPool, WL_SOCKET_READABLE, sock, NULL, session);
 
@@ -4261,10 +4265,16 @@ PostgresMain(int argc, char *argv[],
 				}
 				else
 				{
-					elog(DEBUG2, "Switch to session %d in backend %d", ready_client.fd, MyProcPid);
-					ActiveSession = (SessionContext*)ready_client.user_data;
-					MyProcPort = ActiveSession->port;
-					SetTempNamespaceState(ActiveSession->tempNamespace, ActiveSession->tempToastNamespace);
+					SessionContext* newSession = (SessionContext*)ready_client.user_data;
+					if (ActiveSession != newSession)
+					{
+						elog(DEBUG2, "Switch to session %d in backend %d", ready_client.fd, MyProcPid);
+						RestoreSessionGUCs(ActiveSession);
+						ActiveSession = newSession;
+						RestoreSessionGUCs(ActiveSession);
+						MyProcPort = ActiveSession->port;
+						SetTempNamespaceState(ActiveSession->tempNamespace, ActiveSession->tempToastNamespace);
+					}
 				}
 			}
 		}

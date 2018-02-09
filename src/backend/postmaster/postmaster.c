@@ -494,6 +494,7 @@ typedef struct
 {
 	Port		port;
 	InheritableSocket portsocket;
+	InheritableSocket sessionsocket;
 	char		DataDir[MAXPGPATH];
 	pgsocket	ListenSocket[MAXLISTEN];
 	int32		MyCancelKey;
@@ -4066,7 +4067,7 @@ BackendStartup(Port *port)
 		Assert(BackendListClockPtr && BackendListClockPtr->session_send_sock != PGINVALID_SOCKET);
 		elog(DEBUG2, "Start new session for socket %d at backend %d total %d", port->sock, BackendListClockPtr->pid, nNormalBackends);
 		/* Send connection socket to the backend pointed by BackendListClockPtr */
-		if (pg_send_sock(BackendListClockPtr->session_send_sock, port->sock) < 0)
+		if (pg_send_sock(BackendListClockPtr->session_send_sock, port->sock, BackendListClockPtr->pid) < 0)
 			elog(FATAL, "Failed to send session socket: %m");
 		AdvanceBackendListClockPtr(); /* round-robin backends */
 		return STATUS_OK;
@@ -4119,11 +4120,15 @@ BackendStartup(Port *port)
 
 	/* Create socket pair for sending session sockets to the backend */
 	if (SessionPoolSize != 0)
+	{
 		if (socketpair(AF_UNIX, SOCK_DGRAM, 0, session_pipe) < 0)
 			ereport(FATAL,
 					(errcode_for_file_access(),
 					 errmsg_internal("could not create socket pair for launching sessions: %m")));
-
+#ifdef WIN32
+		SessionPoolSock = session_pipe[0];
+#endif
+	}
 #ifdef EXEC_BACKEND
 	pid = backend_forkexec(port);
 #else							/* !EXEC_BACKEND */
@@ -6109,6 +6114,9 @@ save_backend_variables(BackendParameters *param, Port *port,
 	if (!write_inheritable_socket(&param->portsocket, port->sock, childPid))
 		return false;
 
+	if (!write_inheritable_socket(&param->sessionsocket, SessionPoolSock, childPid))
+		return false;
+
 	strlcpy(param->DataDir, DataDir, MAXPGPATH);
 
 	memcpy(&param->ListenSocket, &ListenSocket, sizeof(ListenSocket));
@@ -6341,6 +6349,7 @@ restore_backend_variables(BackendParameters *param, Port *port)
 {
 	memcpy(port, &param->port, sizeof(Port));
 	read_inheritable_socket(&port->sock, &param->portsocket);
+	read_inheritable_socket(&SessionPoolSock, &param->sessionsocket);
 
 	SetDataDir(param->DataDir);
 

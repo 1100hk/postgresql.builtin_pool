@@ -24,9 +24,30 @@
 /*
  * Send socket descriptor "sock" to backend process through Unix socket "chan"
  */
-int pg_send_sock(pgsocket chan, pgsocket sock)
+int pg_send_sock(pgsocket chan, pgsocket sock, pid_t pid)
 {
-    struct msghdr msg = { 0 };
+#ifdef WIN32
+	InheritableSocket dst;
+	size_t rc;
+	dst.origsocket = sock;
+	if (WSADuplicateSocket(sock, pid, &dst.wsainfo) != 0)
+	{
+		ereport(FATAL,
+				(errmsg("could not duplicate socket %d for use in backend: error code %d",
+						(int)sock, WSAGetLastError())));
+		return -1;
+	}
+	rc = send(sock, &dst, sizeof(dst), 0);
+	if (rc != sizeof(dst))
+	{
+		ereport(FATAL,
+				(errmsg("Failed to send inheritable socket: rc=%d, error code %d",
+						(int)rc, WSAGetLastError())));
+		return -1;
+	}
+	return 0;
+#else
+	struct msghdr msg = { 0 };
 	struct iovec io;
 	struct cmsghdr * cmsg;
     char buf[CMSG_SPACE(sizeof(sock))];
@@ -54,6 +75,7 @@ int pg_send_sock(pgsocket chan, pgsocket sock)
 		return -1;
 	}
 	return 0;
+#endif
 }
 
 
@@ -62,7 +84,38 @@ int pg_send_sock(pgsocket chan, pgsocket sock)
  */
 pgsocket pg_recv_sock(pgsocket chan)
 {
-    struct msghdr msg = {0};
+#ifdef WIN32
+	InheritableSocket src;
+	SOCKET s;
+	size_t rc = recv(chan, &src, sizeof(src), 0);
+	if (rc != sizeof(src))
+	{
+		ereport(FATAL,
+				(errmsg("Failed to receive inheritable socket: rc=%d, error code %d",
+						(int)rc, WSAGetLastError())));
+	}
+	s = WSASocket(FROM_PROTOCOL_INFO,
+				  FROM_PROTOCOL_INFO,
+				  FROM_PROTOCOL_INFO,
+				  &src.wsainfo,
+				  0,
+				  0);
+	if (s == INVALID_SOCKET)
+	{
+		ereport(FATAL,
+				(errmsg("could not create inherited socket: error code %d\n",
+						WSAGetLastError())));
+	}
+
+	/*
+	 * To make sure we don't get two references to the same socket, close
+	 * the original one. (This would happen when inheritance actually
+	 * works..
+	 */
+	closesocket(src.origsocket);
+	return s;
+#else
+	struct msghdr msg = {0};
     char c_buffer[256];
     char m_buffer[256];
     struct iovec io;
@@ -86,4 +139,5 @@ pgsocket pg_recv_sock(pgsocket chan)
     memcpy(&sock, CMSG_DATA(cmsg), sizeof(sock));
 
     return sock;
+#endif
 }

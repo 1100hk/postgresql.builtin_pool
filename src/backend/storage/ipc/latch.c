@@ -132,7 +132,7 @@ static void WaitEventAdjustEpoll(WaitEventSet *set, WaitEvent *event, int action
 #elif defined(WAIT_USE_POLL)
 static void WaitEventAdjustPoll(WaitEventSet *set, WaitEvent *event, bool remove);
 #elif defined(WAIT_USE_WIN32)
-static void WaitEventAdjustWin32(WaitEventSet *set, WaitEvent *event);
+static void WaitEventAdjustWin32(WaitEventSet *set, WaitEvent *event, bool remove);
 #endif
 
 static inline int WaitEventSetWaitBlock(WaitEventSet *set, int cur_timeout,
@@ -734,7 +734,7 @@ AddWaitEventToSet(WaitEventSet *set, uint32 events, pgsocket fd, Latch *latch,
 #elif defined(WAIT_USE_POLL)
 	WaitEventAdjustPoll(set, event, false);
 #elif defined(WAIT_USE_WIN32)
-	WaitEventAdjustWin32(set, event);
+	WaitEventAdjustWin32(set, event, false);
 #endif
 
 	return event->pos;
@@ -755,6 +755,8 @@ void DeleteWaitEventFromSet(WaitEventSet *set, pgsocket fd)
 			WaitEventAdjustEpoll(set, event, EPOLL_CTL_DEL);
 #elif defined(WAIT_USE_POLL)
 			WaitEventAdjustPoll(set, event, true);
+#elif defined(WAIT_USE_WIN32)
+			WaitEventAdjustWin32(set, event, true);
 #endif
 			break;
 		}
@@ -811,7 +813,7 @@ ModifyWaitEvent(WaitEventSet *set, int pos, uint32 events, Latch *latch)
 #elif defined(WAIT_USE_POLL)
 	WaitEventAdjustPoll(set, event, false);
 #elif defined(WAIT_USE_WIN32)
-	WaitEventAdjustWin32(set, event);
+	WaitEventAdjustWin32(set, event, false);
 #endif
 }
 
@@ -919,9 +921,24 @@ WaitEventAdjustPoll(WaitEventSet *set, WaitEvent *event, bool remove)
 
 #if defined(WAIT_USE_WIN32)
 static void
-WaitEventAdjustWin32(WaitEventSet *set, WaitEvent *event)
+WaitEventAdjustWin32(WaitEventSet *set, WaitEvent *event, bool remove)
 {
-	HANDLE	   *handle = &set->handles[event->pos + 1];
+	int pos = event->pos;
+	HANDLE	   *handle = &set->handles[pos + 1];
+
+	if (remove)
+	{
+		Assert(event->fd != PGINVALID_SOCKET);
+
+		if (*handle != WSA_INVALID_EVENT)
+			WSACloseEvent(*handle);
+
+		set->nevents -= 1;
+		set->events[pos] = set->events[set->nevents];
+		*handle = set->events[set->nevents + 1];
+		event->pos = pos;
+		return;
+	}
 
 	if (event->events == WL_LATCH_SET)
 	{
@@ -934,7 +951,7 @@ WaitEventAdjustWin32(WaitEventSet *set, WaitEvent *event)
 	}
 	else
 	{
-		int			flags = FD_CLOSE;	/* always check for errors/EOF */
+		int flags = FD_CLOSE;	/* always check for errors/EOF */
 
 		if (event->events & WL_SOCKET_READABLE)
 			flags |= FD_READ;
@@ -1350,7 +1367,7 @@ WaitEventSetWaitBlock(WaitEventSet *set, int cur_timeout,
 	{
 		if (cur_event->reset)
 		{
-			WaitEventAdjustWin32(set, cur_event);
+			WaitEventAdjustWin32(set, cur_event, false);
 			cur_event->reset = false;
 		}
 

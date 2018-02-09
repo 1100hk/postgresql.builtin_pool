@@ -21,6 +21,7 @@
 #include "storage/lock.h"
 #include "storage/pg_sema.h"
 #include "storage/proclist_types.h"
+#include "utils/guc_tables.h"
 
 /*
  * Each backend advertises up to PGPROC_MAX_CACHED_SUBXIDS TransactionIds
@@ -273,6 +274,13 @@ extern PGDLLIMPORT PROC_HDR *ProcGlobal;
 
 extern PGPROC *PreparedXactProcs;
 
+typedef struct SessionGUC
+{
+	struct SessionGUC* next;
+	config_var_value   val;
+	struct config_generic *var;
+} SessionGUC;
+
 /*
  * Information associated with client session
  */
@@ -283,6 +291,7 @@ typedef struct SessionContext
 	char*        id;             /* session identifier used to construct unique prepared statement names */
 	Oid          tempNamespace;  /* temporary namespace */
 	Oid          tempToastNamespace;  /* temporary toast namespace */
+	SessionGUC*  gucs;
 } SessionContext;
 
 
