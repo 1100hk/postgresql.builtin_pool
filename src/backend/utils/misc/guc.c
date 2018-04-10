@@ -1894,6 +1894,21 @@ static struct config_int ConfigureNamesInt[] =
 	},
 
 	{
+		{"session_pool_ports", PGC_POSTMASTER, CONN_AUTH_SETTINGS,
+		 gettext_noop("Number of session ports = number of session pools."),
+		 gettext_noop("Number of extra parts which PostgreSQL will listen to accept client session. Each such port has separate session pool."
+					  "It is intended that each port corresponds to some particular database/user combination, so that all backends in this session "
+					  "pool will handle connection accessing this database. If session_pool_port is non zero then postmaster will always spawn dedicated (non-pooling) "
+					  " backends at the main Postgres port. If session_pool_port is zero and session_pool_size is not zero, then sessions (pooled connection) will be also "
+					  "accepted at main port. Session pool ports are allocatged sequentially: if Postgres main port is 5432 and session_pool_ports is 2, "
+					  "then ports 5433 and 5434 will be used for connection pooling.")
+	    },
+		&SessionPoolPorts,
+		0, 0, MAX_SESSION_PORTS,
+		NULL, NULL, NULL
+	},
+
+	{
 		{"superuser_reserved_connections", PGC_POSTMASTER, CONN_AUTH_SETTINGS,
 			gettext_noop("Sets the number of connection slots reserved for superusers."),
 			NULL

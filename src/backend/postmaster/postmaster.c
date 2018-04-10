@@ -180,18 +180,11 @@ typedef struct bkend
 	bool		dead_end;		/* is it going to send an error and quit? */
 	bool		bgworker_notify;	/* gets bgworker start/stop notifications */
 	dlist_node	elem;			/* list link in BackendList */
+	int         session_pool_id;    /* identifier of backends session pool */
+	int         worker_id;      /* identifier of worker within session pool */
 } Backend;
 
 static dlist_head BackendList = DLIST_STATIC_INIT(BackendList);
-/*
- * Pointer in backend list used to implement round-robin distribution of sessions through backends.
- * This variable either NULL, either points to the normal backend.
- */
-static Backend*   BackendListClockPtr;
-/*
- * Number of active normal backends
- */
-static int        nNormalBackends;
 
 #ifdef EXEC_BACKEND
 static Backend *ShmemBackendArray;
@@ -199,7 +192,14 @@ static Backend *ShmemBackendArray;
 
 BackgroundWorker *MyBgworkerEntry = NULL;
 
+typedef struct PostmasterSessionPool
+{
+	Backend** workers; /* pool backends */
+	int n_workers;    /* number of launched worker backends in this pool so far */
+	int rr_index;     /* index of current backends used to implement round-robin distribution of sessions through backends. */
+} PostmasterSessionPool;
 
+static PostmasterSessionPool SessionPools[MAX_SESSION_PORTS];
 
 /* The socket number we are listening for connections on */
 int			PostPortNumber;
@@ -223,7 +223,7 @@ int			ReservedBackends;
 
 /* The socket(s) we're listening to. */
 #define MAXLISTEN	64
-static pgsocket ListenSocket[MAXLISTEN];
+static pgsocket ListenSocket[MAX_SESSION_PORTS][MAXLISTEN];
 
 /*
  * Set by the -o option
@@ -421,7 +421,7 @@ static void BackendInitialize(Port *port);
 static void BackendRun(Port *port) pg_attribute_noreturn();
 static void ExitPostmaster(int status) pg_attribute_noreturn();
 static int	ServerLoop(void);
-static int	BackendStartup(Port *port);
+static int	BackendStartup(Port *port, int session_pool_id);
 static void SendNegotiateProtocolVersion(List *unrecognized_protocol_options);
 static void processCancelRequest(Port *port, void *pkt);
 static int	initMasks(fd_set *rmask);
@@ -496,7 +496,7 @@ typedef struct
 	InheritableSocket portsocket;
 	InheritableSocket sessionsocket;
 	char		DataDir[MAXPGPATH];
-	pgsocket	ListenSocket[MAXLISTEN];
+	pgsocket	ListenSocket[MAX_SESSION_PORTS][MAXLISTEN];
 	int32		MyCancelKey;
 	int			MyPMChildSlot;
 #ifndef WIN32
@@ -578,22 +578,6 @@ HANDLE		PostmasterHandle;
 #endif
 
 /*
- * Move current backend pointer to the next normal backend.
- * This function is called either when new session is started to implement round-robin policy, either when backend pointer by BackendListClockPtr is terminated
- */
-static void AdvanceBackendListClockPtr(void)
-{
-	Backend* b = BackendListClockPtr;
-	do {
-		dlist_node* node = &b->elem;
-		node = node->next ? node->next : BackendList.head.next;
-		b = dlist_container(Backend, elem, node);
-	} while (b->bkend_type != BACKEND_TYPE_NORMAL && b != BackendListClockPtr);
-
-	BackendListClockPtr = b;
-}
-
-/*
  * Postmaster main entry point
  */
 void
@@ -603,7 +587,7 @@ PostmasterMain(int argc, char *argv[])
 	int			status;
 	char	   *userDoption = NULL;
 	bool		listen_addr_saved = false;
-	int			i;
+	int			i, j;
 	char	   *output_config_variable = NULL;
 
 	MyProcPid = PostmasterPid = getpid();
@@ -1016,8 +1000,9 @@ PostmasterMain(int argc, char *argv[])
 	 * First, mark them all closed, and set up an on_proc_exit function that's
 	 * charged with closing the sockets again at postmaster shutdown.
 	 */
-	for (i = 0; i < MAXLISTEN; i++)
-		ListenSocket[i] = PGINVALID_SOCKET;
+	for (i = 0; i <= SessionPoolPorts; i++)
+		for (j = 0; j < MAXLISTEN; j++)
+			ListenSocket[i][j] = PGINVALID_SOCKET;
 
 	on_proc_exit(CloseServerPorts, 0);
 
@@ -1045,33 +1030,35 @@ PostmasterMain(int argc, char *argv[])
 		{
 			char	   *curhost = (char *) lfirst(l);
 
-			if (strcmp(curhost, "*") == 0)
-				status = StreamServerPort(AF_UNSPEC, NULL,
-										  (unsigned short) PostPortNumber,
-										  NULL,
-										  ListenSocket, MAXLISTEN);
-			else
-				status = StreamServerPort(AF_UNSPEC, curhost,
-										  (unsigned short) PostPortNumber,
-										  NULL,
-										  ListenSocket, MAXLISTEN);
-
-			if (status == STATUS_OK)
+			for (i = 0; i <= SessionPoolPorts; i++)
 			{
-				success++;
-				/* record the first successful host addr in lockfile */
-				if (!listen_addr_saved)
-				{
-					AddToDataDirLockFile(LOCK_FILE_LINE_LISTEN_ADDR, curhost);
-					listen_addr_saved = true;
-				}
-			}
-			else
-				ereport(WARNING,
-						(errmsg("could not create listen socket for \"%s\"",
-								curhost)));
-		}
+				if (strcmp(curhost, "*") == 0)
+					status = StreamServerPort(AF_UNSPEC, NULL,
+											  (unsigned short) PostPortNumber + i,
+											  NULL,
+											  ListenSocket[i], MAXLISTEN);
+				else
+					status = StreamServerPort(AF_UNSPEC, curhost,
+											  (unsigned short) PostPortNumber + i,
+											  NULL,
+											  ListenSocket[i], MAXLISTEN);
 
+				if (status == STATUS_OK)
+				{
+					success++;
+					/* record the first successful host addr in lockfile */
+					if (!listen_addr_saved)
+					{
+						AddToDataDirLockFile(LOCK_FILE_LINE_LISTEN_ADDR, curhost);
+						listen_addr_saved = true;
+					}
+				}
+				else
+					ereport(WARNING,
+							(errmsg("could not create listen socket for \"%s\"",
+									curhost)));
+			}
+		}
 		if (!success && elemlist != NIL)
 			ereport(FATAL,
 					(errmsg("could not create any TCP/IP sockets")));
@@ -1082,7 +1069,7 @@ PostmasterMain(int argc, char *argv[])
 
 #ifdef USE_BONJOUR
 	/* Register for Bonjour only if we opened TCP socket(s) */
-	if (enable_bonjour && ListenSocket[0] != PGINVALID_SOCKET)
+	if (enable_bonjour && ListenSocket[0][0] != PGINVALID_SOCKET)
 	{
 		DNSServiceErrorType err;
 
@@ -1143,24 +1130,26 @@ PostmasterMain(int argc, char *argv[])
 		{
 			char	   *socketdir = (char *) lfirst(l);
 
-			status = StreamServerPort(AF_UNIX, NULL,
-									  (unsigned short) PostPortNumber,
-									  socketdir,
-									  ListenSocket, MAXLISTEN);
-
-			if (status == STATUS_OK)
+			for (i = 0; i <= SessionPoolPorts; i++)
 			{
-				success++;
-				/* record the first successful Unix socket in lockfile */
-				if (success == 1)
-					AddToDataDirLockFile(LOCK_FILE_LINE_SOCKET_DIR, socketdir);
-			}
-			else
-				ereport(WARNING,
-						(errmsg("could not create Unix-domain socket in directory \"%s\"",
-								socketdir)));
-		}
+				status = StreamServerPort(AF_UNIX, NULL,
+										  (unsigned short) PostPortNumber + i,
+										  socketdir,
+										  ListenSocket[i], MAXLISTEN);
 
+				if (status == STATUS_OK)
+				{
+					success++;
+					/* record the first successful Unix socket in lockfile */
+					if (success == 1)
+						AddToDataDirLockFile(LOCK_FILE_LINE_SOCKET_DIR, socketdir);
+				}
+				else
+					ereport(WARNING,
+							(errmsg("could not create Unix-domain socket in directory \"%s\"",
+									socketdir)));
+			}
+		}
 		if (!success && elemlist != NIL)
 			ereport(FATAL,
 					(errmsg("could not create any Unix-domain sockets")));
@@ -1173,7 +1162,7 @@ PostmasterMain(int argc, char *argv[])
 	/*
 	 * check that we have some socket to listen on
 	 */
-	if (ListenSocket[0] == PGINVALID_SOCKET)
+	if (ListenSocket[0][0] == PGINVALID_SOCKET)
 		ereport(FATAL,
 				(errmsg("no socket created for listening")));
 
@@ -1405,7 +1394,7 @@ PostmasterMain(int argc, char *argv[])
 static void
 CloseServerPorts(int status, Datum arg)
 {
-	int			i;
+	int			i, j;
 
 	/*
 	 * First, explicitly close all the socket FDs.  We used to just let this
@@ -1413,12 +1402,15 @@ CloseServerPorts(int status, Datum arg)
 	 * before we remove the postmaster.pid lockfile; otherwise there's a race
 	 * condition if a new postmaster wants to re-use the TCP port number.
 	 */
-	for (i = 0; i < MAXLISTEN; i++)
+	for (i = 0; i <= SessionPoolPorts; i++)
 	{
-		if (ListenSocket[i] != PGINVALID_SOCKET)
+		for (j = 0; j < MAXLISTEN; j++)
 		{
-			StreamClose(ListenSocket[i]);
-			ListenSocket[i] = PGINVALID_SOCKET;
+			if (ListenSocket[i][j] != PGINVALID_SOCKET)
+			{
+				StreamClose(ListenSocket[i][j]);
+				ListenSocket[i][j] = PGINVALID_SOCKET;
+			}
 		}
 	}
 
@@ -1767,27 +1759,30 @@ ServerLoop(void)
 		 */
 		if (selres > 0)
 		{
-			int			i;
+			int			i, j;
 
-			for (i = 0; i < MAXLISTEN; i++)
+			for (i = 0; i <= SessionPoolPorts; i++)
 			{
-				if (ListenSocket[i] == PGINVALID_SOCKET)
-					break;
-				if (FD_ISSET(ListenSocket[i], &rmask))
+				for (j = 0; j < MAXLISTEN; j++)
 				{
-					Port	   *port;
-
-					port = ConnCreate(ListenSocket[i]);
-					if (port)
+					if (ListenSocket[i][j] == PGINVALID_SOCKET)
+						break;
+					if (FD_ISSET(ListenSocket[i][j], &rmask))
 					{
-						BackendStartup(port);
+						Port	   *port;
 
-						/*
-						 * We no longer need the open socket or port structure
-						 * in this process
-						 */
-						StreamClose(port->sock);
-						ConnFree(port);
+						port = ConnCreate(ListenSocket[i][j]);
+						if (port)
+						{
+							BackendStartup(port, i);
+
+							/*
+							 * We no longer need the open socket or port structure
+							 * in this process
+							 */
+							StreamClose(port->sock);
+							ConnFree(port);
+						}
 					}
 				}
 			}
@@ -1939,20 +1934,23 @@ static int
 initMasks(fd_set *rmask)
 {
 	int			maxsock = -1;
-	int			i;
+	int			i, j;
 
 	FD_ZERO(rmask);
 
-	for (i = 0; i < MAXLISTEN; i++)
+	for (i = 0; i <= SessionPoolPorts; i++)
 	{
-		int			fd = ListenSocket[i];
+		for (j = 0; j < MAXLISTEN; j++)
+		{
+			int			fd = ListenSocket[i][j];
 
-		if (fd == PGINVALID_SOCKET)
-			break;
-		FD_SET(fd, rmask);
+			if (fd == PGINVALID_SOCKET)
+				break;
+			FD_SET(fd, rmask);
 
-		if (fd > maxsock)
-			maxsock = fd;
+			if (fd > maxsock)
+				maxsock = fd;
+		}
 	}
 
 	return maxsock + 1;
@@ -2004,7 +2002,6 @@ ProcessStartupPacket(Port *port, bool SSLdone, MemoryContext memctx)
 				 errmsg("invalid length of startup packet")));
 		return STATUS_ERROR;
 	}
-
 	/*
 	 * Allocate at least the size of an old-style startup packet, plus one
 	 * extra byte, and make sure all are zeroes.  This ensures we will have
@@ -2125,7 +2122,6 @@ retry1:
 			if (valoffset >= len)
 				break;			/* missing value, will complain below */
 			valptr = ((char *) buf) + valoffset;
-
 			if (strcmp(nameptr, "database") == 0)
 				port->database_name = pstrdup(valptr);
 			else if (strcmp(nameptr, "user") == 0)
@@ -2524,7 +2520,7 @@ ConnFree(Port *conn)
 void
 ClosePostmasterPorts(bool am_syslogger)
 {
-	int			i;
+	int			i, j;
 
 #ifndef WIN32
 
@@ -2541,12 +2537,15 @@ ClosePostmasterPorts(bool am_syslogger)
 #endif
 
 	/* Close the listen sockets */
-	for (i = 0; i < MAXLISTEN; i++)
+	for (i = 0; i < SessionPoolPorts; i++)
 	{
-		if (ListenSocket[i] != PGINVALID_SOCKET)
+		for (j = 0; j < MAXLISTEN; j++)
 		{
-			StreamClose(ListenSocket[i]);
-			ListenSocket[i] = PGINVALID_SOCKET;
+			if (ListenSocket[i][j] != PGINVALID_SOCKET)
+			{
+				StreamClose(ListenSocket[i][j]);
+				ListenSocket[i][j] = PGINVALID_SOCKET;
+			}
 		}
 	}
 
@@ -3266,14 +3265,18 @@ CleanupBackgroundWorker(int pid,
  */
 static void UnlinkBackend(Backend* bp)
 {
-	if (bp->bkend_type == BACKEND_TYPE_NORMAL)
+	if (bp->bkend_type == BACKEND_TYPE_NORMAL
+		&& bp->session_send_sock != PGINVALID_SOCKET)
 	{
-		if (bp == BackendListClockPtr)
-			AdvanceBackendListClockPtr();
-		if (bp->session_send_sock != PGINVALID_SOCKET)
-			close(bp->session_send_sock);
+		PostmasterSessionPool* pool = &SessionPools[bp->session_pool_id];
+		Assert(pool->n_workers > bp->worker_id && pool->workers[bp->worker_id] == bp);
+		if (--pool->n_workers != 0)
+		{
+			pool->workers[bp->worker_id] = pool->workers[pool->n_workers];
+			pool->rr_index %= pool->n_workers;
+		}
+		closesocket(bp->session_send_sock);
 		elog(DEBUG2, "Cleanup backend %d", bp->pid);
-		nNormalBackends -= 1;
 	}
 	dlist_delete(&bp->elem);
 	free(bp);
@@ -4055,21 +4058,26 @@ TerminateChildren(int signal)
  * Note: if you change this code, also consider StartAutovacuumWorker.
  */
 static int
-BackendStartup(Port *port)
+BackendStartup(Port *port, int session_pool_id)
 {
 	Backend    *bn;				/* for backend cleanup */
 	pid_t		pid;
-	int         session_pipe[2];
+	pgsocket        session_pipe[2];
+	PostmasterSessionPool* pool = &SessionPools[session_pool_id];
+	bool dedicated_backend = SessionPoolSize == 0 || (SessionPoolPorts != 0 && session_pool_id == 0);
 
-	if (SessionPoolSize != 0 && nNormalBackends >= SessionPoolSize)
+	if (!dedicated_backend && pool->n_workers >= SessionPoolSize)
 	{
+		Backend* worker = pool->workers[pool->rr_index];
 		/* In case of session pooling instead of spawning new backend open new session at one of the existed backends. */
-		Assert(BackendListClockPtr && BackendListClockPtr->session_send_sock != PGINVALID_SOCKET);
-		elog(DEBUG2, "Start new session for socket %d at backend %d total %d", port->sock, BackendListClockPtr->pid, nNormalBackends);
-		/* Send connection socket to the backend pointed by BackendListClockPtr */
-		if (pg_send_sock(BackendListClockPtr->session_send_sock, port->sock, BackendListClockPtr->pid) < 0)
+		elog(DEBUG2, "Start new session in pool %d for socket %d at backend %d",
+			 session_pool_id, port->sock, worker->pid);
+		/* Send connection socket to the worker backend */
+		if (pg_send_sock(worker->session_send_sock, port->sock, worker->pid) < 0)
 			elog(FATAL, "Failed to send session socket: %m");
-		AdvanceBackendListClockPtr(); /* round-robin backends */
+
+		pool->rr_index = (pool->rr_index + 1) % pool->n_workers; /* round-robin */
+
 		return STATUS_OK;
 	}
 
@@ -4078,7 +4086,7 @@ BackendStartup(Port *port)
 	 * Create backend data structure.  Better before the fork() so we can
 	 * handle failure cleanly.
 	 */
-	bn = (Backend *) malloc(sizeof(Backend));
+	bn = (Backend *) calloc(1, sizeof(Backend));
 	if (!bn)
 	{
 		ereport(LOG,
@@ -4119,7 +4127,7 @@ BackendStartup(Port *port)
 	bn->bgworker_notify = false;
 
 	/* Create socket pair for sending session sockets to the backend */
-	if (SessionPoolSize != 0)
+	if (!dedicated_backend)
 	{
 		if (socketpair(AF_UNIX, SOCK_DGRAM, 0, session_pipe) < 0)
 			ereport(FATAL,
@@ -4135,7 +4143,7 @@ BackendStartup(Port *port)
 	pid = fork_process();
 	if (pid == 0)				/* child */
 	{
-		if (SessionPoolSize != 0)
+		if (!dedicated_backend)
 		{
 			SessionPoolSock = session_pipe[0]; /* Use this socket for receiving client session socket descriptor */
 			close(session_pipe[1]); /* Close unused end of the pipe */
@@ -4181,19 +4189,22 @@ BackendStartup(Port *port)
 	 * of backends.
 	 */
 	bn->pid = pid;
-	if (SessionPoolSize != 0)
-	{
-		bn->session_send_sock = session_pipe[1]; /* Use this socket for sending client session socket descriptor */
-		close(session_pipe[0]); /* Close unused end of the pipe */
-	}
-	else
-		bn->session_send_sock = PGINVALID_SOCKET;
+	bn->session_send_sock = PGINVALID_SOCKET;
 	bn->bkend_type = BACKEND_TYPE_NORMAL;	/* Can change later to WALSND */
 	dlist_push_head(&BackendList, &bn->elem);
-	if (BackendListClockPtr == NULL)
-		BackendListClockPtr = bn;
-	nNormalBackends += 1;
-	elog(DEBUG2, "Start backend %d total %d", pid, nNormalBackends);
+
+	if (!dedicated_backend)
+	{
+		bn->session_send_sock = session_pipe[1]; /* Use this socket for sending client session socket descriptor */
+		closesocket(session_pipe[0]); /* Close unused end of the pipe */
+		if (pool->workers == NULL)
+			pool->workers = (Backend**)malloc(sizeof(Backend*)*SessionPoolSize);
+		bn->worker_id = pool->n_workers++;
+		pool->workers[bn->worker_id] = bn;
+		bn->session_pool_id = session_pool_id;
+		elog(DEBUG2, "Start %d-th worker in session pool %d pid %d",
+			 pool->n_workers, session_pool_id, pid);
+	}
 #ifdef EXEC_BACKEND
 	if (!bn->dead_end)
 		ShmemBackendArrayAdd(bn);

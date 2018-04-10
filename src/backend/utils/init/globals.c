@@ -121,6 +121,7 @@ int			maintenance_work_mem = 16384;
  */
 int			NBuffers = 1000;
 int			SessionPoolSize = 0;
+int			SessionPoolPorts = 0;
 int			MaxConnections = 90;
 int			MaxSessions = 1000;
 int			max_worker_processes = 8;

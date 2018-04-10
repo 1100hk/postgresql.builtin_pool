@@ -21,6 +21,14 @@
 #include <time.h>
 #include <unistd.h>
 
+#ifdef WIN32
+typedef struct
+{
+	SOCKET origsocket;
+	WSAPROTOCOL_INFO wsainfo;
+} InheritableSocket;
+#endif
+
 /*
  * Send socket descriptor "sock" to backend process through Unix socket "chan"
  */
@@ -37,7 +45,7 @@ int pg_send_sock(pgsocket chan, pgsocket sock, pid_t pid)
 						(int)sock, WSAGetLastError())));
 		return -1;
 	}
-	rc = send(sock, &dst, sizeof(dst), 0);
+	rc = send(chan, &dst, sizeof(dst), 0);
 	if (rc != sizeof(dst))
 	{
 		ereport(FATAL,

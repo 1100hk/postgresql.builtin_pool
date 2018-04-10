@@ -672,7 +672,8 @@ AddWaitEventToSet(WaitEventSet *set, uint32 events, pgsocket fd, Latch *latch,
 	int free_event;
 
 	/* not enough space */
-	Assert(set->nevents < set->nevents_space);
+	if (set->nevents == set->nevents_space)
+		return -1;
 
 	if (latch)
 	{
@@ -935,7 +936,8 @@ WaitEventAdjustWin32(WaitEventSet *set, WaitEvent *event, bool remove)
 
 		set->nevents -= 1;
 		set->events[pos] = set->events[set->nevents];
-		*handle = set->events[set->nevents + 1];
+		*handle = set->handles[set->nevents + 1];
+		set->handles[set->nevents + 1] = WSA_INVALID_EVENT;
 		event->pos = pos;
 		return;
 	}
@@ -968,8 +970,8 @@ WaitEventAdjustWin32(WaitEventSet *set, WaitEvent *event, bool remove)
 					 WSAGetLastError());
 		}
 		if (WSAEventSelect(event->fd, *handle, flags) != 0)
-			elog(ERROR, "failed to set up event for socket: error code %u",
-				 WSAGetLastError());
+			elog(ERROR, "failed to set up event for socket %p: error code %u",
+				 event->fd, WSAGetLastError());
 
 		Assert(event->fd != PGINVALID_SOCKET);
 	}

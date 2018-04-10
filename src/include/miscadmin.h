@@ -159,6 +159,7 @@ extern PGDLLIMPORT int MaxBackends;
 extern PGDLLIMPORT int MaxConnections;
 extern PGDLLIMPORT int MaxSessions;
 extern PGDLLIMPORT int SessionPoolSize;
+extern PGDLLIMPORT int SessionPoolPorts;
 extern PGDLLIMPORT int max_worker_processes;
 extern int	max_parallel_workers;
 
@@ -176,6 +177,8 @@ extern char pkglib_path[];
 #ifdef EXEC_BACKEND
 extern char postgres_exec_path[];
 #endif
+
+#define MAX_SESSION_PORTS	8
 
 /*
  * done in storage/backendid.h for now.

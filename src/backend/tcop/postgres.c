@@ -4144,7 +4144,7 @@ PostgresMain(int argc, char *argv[],
 				if (SessionPool == NULL)
 				{
 					/* Construct wait event set if not constructed yet */
-					SessionPool = CreateWaitEventSet(TopMemoryContext, MaxSessions);
+					SessionPool = CreateWaitEventSet(TopMemoryContext, MaxSessions+3);
 					/* Add event to detect postmaster death */
 					AddWaitEventToSet(SessionPool, WL_POSTMASTER_DEATH, PGINVALID_SOCKET, NULL, ActiveSession);
 					/* Add event for backends latch */
@@ -4188,7 +4188,7 @@ PostgresMain(int argc, char *argv[],
 					MemoryContext oldcontext;
 
 					sock = pg_recv_sock(SessionPoolSock);
-					if (sock < 0)
+					if (sock == PGINVALID_SOCKET)
 						elog(FATAL, "Failed to receive session socket: %m");
 
 					session = (SessionContext*)calloc(1, sizeof(SessionContext));
@@ -4224,44 +4224,46 @@ PostgresMain(int argc, char *argv[],
 					}
 					else if (status == STATUS_OK)
 					{
-						elog(DEBUG2, "Start new session %d in backend %d for database %s user %s",
-							 sock, MyProcPid, port->database_name, port->user_name);
-						RestoreSessionGUCs(ActiveSession);
-						ActiveSession = session;
-						AddWaitEventToSet(SessionPool, WL_SOCKET_READABLE, sock, NULL, session);
+						if (AddWaitEventToSet(SessionPool, WL_SOCKET_READABLE, sock, NULL, session) < 0)
+						{
+							elog(WARNING, "Too much pooled sessions: %d", MaxSessions);
+						}
+						else
+						{
+							elog(DEBUG2, "Start new session %d in backend %d for database %s user %s",
+								 (int)sock, MyProcPid, port->database_name, port->user_name);
+							RestoreSessionGUCs(ActiveSession);
+							ActiveSession = session;
+							SetCurrentStatementStartTimestamp();
+							StartTransactionCommand();
+							PerformAuthentication(MyProcPort);
+							CommitTransactionCommand();
 
-						SetCurrentStatementStartTimestamp();
-						StartTransactionCommand();
-						PerformAuthentication(MyProcPort);
-						CommitTransactionCommand();
+							/*
+							 * Send GUC options to the client
+							 */
+							BeginReportingGUCOptions();
 
-						/*
-						 * Send GUC options to the client
-						 */
-						BeginReportingGUCOptions();
+							/*
+							 * Send this backend's cancellation info to the frontend.
+							 */
+							pq_beginmessage(&buf, 'K');
+							pq_sendint32(&buf, (int32) MyProcPid);
+							pq_sendint32(&buf, (int32) MyCancelKey);
+							pq_endmessage(&buf);
 
-						/*
-						 * Send this backend's cancellation info to the frontend.
-						 */
-						pq_beginmessage(&buf, 'K');
-						pq_sendint32(&buf, (int32) MyProcPid);
-						pq_sendint32(&buf, (int32) MyCancelKey);
-						pq_endmessage(&buf);
-
-						/* Need not flush since ReadyForQuery will do it. */
-						send_ready_for_query = true;
-						continue;
+							/* Need not flush since ReadyForQuery will do it. */
+							send_ready_for_query = true;
+							continue;
+						}
 					}
-					else
-					{
-						/* Error while processing of startup package
-						 * Reject this session and return back to listening sockets
-						 */
-						DeleteSession(session);
-						elog(LOG, "Session startup failed");
-						close(sock);
-						goto ChooseSession;
-					}
+					/* Error while processing of startup package
+					 * Reject this session and return back to listening sockets
+					 */
+					DeleteSession(session);
+					elog(LOG, "Session startup failed");
+					closesocket(sock);
+					goto ChooseSession;
 				}
 				else
 				{
@@ -4576,7 +4578,7 @@ PostgresMain(int argc, char *argv[],
 					if (pq_is_reading_msg())
 						pq_endmsgread();
 
-					close(MyProcPort->sock);
+					closesocket(MyProcPort->sock);
 					MyProcPort->sock = PGINVALID_SOCKET;
 					MyProcPort = NULL;
 
