@@ -3091,9 +3091,19 @@ ProcessInterrupts(void)
 	{
 		/* Has the timeout setting changed since last we looked? */
 		if (IdleInTransactionSessionTimeout > 0)
-			ereport(FATAL,
-					(errcode(ERRCODE_IDLE_IN_TRANSACTION_SESSION_TIMEOUT),
-					 errmsg("terminating connection due to idle-in-transaction timeout")));
+		{
+			if (ActiveSession)
+			{
+				IdleInTransactionSessionTimeoutPending = false;
+				ereport(ERROR,
+						(errcode(ERRCODE_IDLE_IN_TRANSACTION_SESSION_TIMEOUT),
+						 errmsg("canceling current transaction due to idle-in-transaction timeout")));
+			}
+			else
+				ereport(FATAL,
+						(errcode(ERRCODE_IDLE_IN_TRANSACTION_SESSION_TIMEOUT),
+						 errmsg("terminating connection due to idle-in-transaction timeout")));
+		}
 		else
 			IdleInTransactionSessionTimeoutPending = false;
 
@@ -4039,13 +4049,21 @@ PostgresMain(int argc, char *argv[],
 		 * messages from the client, so there isn't much we can do with the
 		 * connection anymore.
 		 */
-		if (pq_is_reading_msg())
+		if (pq_is_reading_msg() && !ActiveSession)
 			ereport(FATAL,
 					(errcode(ERRCODE_PROTOCOL_VIOLATION),
 					 errmsg("terminating connection because protocol synchronization was lost")));
 
 		/* Now we can allow interrupts again */
 		RESUME_INTERRUPTS();
+
+		if (ActiveSession)
+		{
+			StartTransactionCommand();
+			UserAbortTransactionBlock();
+			CommitTransactionCommand();
+			goto CloseSession;
+		}
 	}
 
 	/* We can now handle ereport(ERROR) */
@@ -4563,6 +4581,7 @@ PostgresMain(int argc, char *argv[],
 
 				if (SessionPool)
 				{
+				  CloseSession:
 					/* In case of session pooling close the session, but do not terminate the backend
 					 * even if there are not more sessions in this backend.
 					 * The reason for keeping backend alive is to prevent redundant process launches if

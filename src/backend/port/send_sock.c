@@ -146,6 +146,8 @@ pgsocket pg_recv_sock(pgsocket chan)
     cmsg = CMSG_FIRSTHDR(&msg);
     memcpy(&sock, CMSG_DATA(cmsg), sizeof(sock));
 
+	pg_set_noblock(sock);
+
     return sock;
 #endif
 }
