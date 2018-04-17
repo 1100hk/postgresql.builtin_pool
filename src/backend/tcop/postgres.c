@@ -4062,7 +4062,8 @@ PostgresMain(int argc, char *argv[],
 			StartTransactionCommand();
 			UserAbortTransactionBlock();
 			CommitTransactionCommand();
-			goto CloseSession;
+			if (pq_is_reading_msg())
+				goto CloseSession;
 		}
 	}
 
