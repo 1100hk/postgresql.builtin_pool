@@ -860,7 +860,7 @@ WaitEventAdjustEpoll(WaitEventSet *set, WaitEvent *event, int action)
 	 * requiring that, and actually it makes the code simpler...
 	 */
 	rc = epoll_ctl(set->epoll_fd, action, event->fd, &epoll_ev);
-
+	Assert(rc >= 0);
 	if (rc < 0)
 		ereport(ERROR,
 				(errcode_for_socket_access(),

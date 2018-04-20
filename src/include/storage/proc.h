@@ -287,15 +287,16 @@ typedef struct SessionGUC
 typedef struct SessionContext
 {
 	MemoryContext memory; /* memory context used for global session data (replacement of TopMemoryContext) */
-	struct Port* port;           /* connection port */
-	char*        id;             /* session identifier used to construct unique prepared statement names */
-	Oid          tempNamespace;  /* temporary namespace */
-	Oid          tempToastNamespace;  /* temporary toast namespace */
-	SessionGUC*  gucs;
+	struct Port*  port;           /* connection port */
+	char*         id;             /* session identifier used to construct unique prepared statement names */
+	Oid           tempNamespace;  /* temporary namespace */
+	Oid           tempToastNamespace;  /* temporary toast namespace */
+	SessionGUC*   gucs;           /* session local GUCs */
+	WaitEventSet* eventSet;       /* Wait set for the session */
 } SessionContext;
 
 
-extern PGDLLIMPORT SessionContext *ActiveSession; 
+extern PGDLLIMPORT SessionContext *ActiveSession;
 
 /* Accessor for PGPROC given a pgprocno. */
 #define GetPGProcByNumber(n) (&ProcGlobal->allProcs[(n)])

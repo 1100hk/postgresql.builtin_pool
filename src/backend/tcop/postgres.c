@@ -221,6 +221,7 @@ static char* CreateSessionId(void)
 static void DeleteSession(SessionContext* session)
 {
 	elog(DEBUG1, "Delete session %p, id=%s,  memory context=%p", session, session->id, session->memory);
+	FreeWaitEventSet(session->eventSet);
 	RestoreSessionGUCs(session);
 	ReleaseSessionGUCs(session);
 	MemoryContextDelete(session->memory);
@@ -3724,6 +3725,7 @@ PostgresMain(int argc, char *argv[],
 		oldcontext = MemoryContextSwitchTo(ActiveSession->memory);
 		ActiveSession->id = CreateSessionId();
 		ActiveSession->port = MyProcPort;
+		ActiveSession->eventSet = FeBeWaitSet;
 		BackendPort = MyProcPort;
 		MemoryContextSwitchTo(oldcontext);
 	}
@@ -4215,7 +4217,7 @@ PostgresMain(int argc, char *argv[],
 															"SessionMemoryContext",
 															ALLOCSET_DEFAULT_SIZES);
 					oldcontext = MemoryContextSwitchTo(session->memory);
-					port = palloc(sizeof(Port));
+					MyProcPort = port = palloc(sizeof(Port));
 					memcpy(port, BackendPort, sizeof(Port));
 
 					/*
@@ -4225,8 +4227,9 @@ PostgresMain(int argc, char *argv[],
 					port->sock = sock;
 					session->port = port;
 					session->id = CreateSessionId();
+					pq_create_backend_event_set();
+					session->eventSet = FeBeWaitSet;
 
-					MyProcPort = port;
 					status = ProcessStartupPacket(port, false, session->memory);
 					MemoryContextSwitchTo(oldcontext);
 
@@ -4249,7 +4252,7 @@ PostgresMain(int argc, char *argv[],
 						}
 						else
 						{
-							elog(DEBUG2, "Start new session %d in backend %d for database %s user %s",
+							elog(DEBUG1, "Start new session %d in backend %d for database %s user %s",
 								 (int)sock, MyProcPid, port->database_name, port->user_name);
 							RestoreSessionGUCs(ActiveSession);
 							ActiveSession = session;
@@ -4289,11 +4292,12 @@ PostgresMain(int argc, char *argv[],
 					SessionContext* newSession = (SessionContext*)ready_client.user_data;
 					if (ActiveSession != newSession)
 					{
-						elog(DEBUG2, "Switch to session %d in backend %d", ready_client.fd, MyProcPid);
+						elog(DEBUG1, "Switch to session %d in backend %d", ready_client.fd, MyProcPid);
 						RestoreSessionGUCs(ActiveSession);
 						ActiveSession = newSession;
 						RestoreSessionGUCs(ActiveSession);
 						MyProcPort = ActiveSession->port;
+						FeBeWaitSet = ActiveSession->eventSet;
 						SetTempNamespaceState(ActiveSession->tempNamespace, ActiveSession->tempToastNamespace);
 					}
 				}
