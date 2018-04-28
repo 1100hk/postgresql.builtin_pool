@@ -4061,9 +4061,12 @@ PostgresMain(int argc, char *argv[],
 
 		if (ActiveSession)
 		{
-			StartTransactionCommand();
-			UserAbortTransactionBlock();
-			CommitTransactionCommand();
+			if (IsAbortedTransactionBlockState())
+			{
+				StartTransactionCommand();
+				UserAbortTransactionBlock();
+				CommitTransactionCommand();
+			}
 			if (pq_is_reading_msg())
 				goto CloseSession;
 		}
