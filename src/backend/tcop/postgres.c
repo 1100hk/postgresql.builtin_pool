@@ -180,6 +180,8 @@ static Port*           BackendPort;    /* Reference to the original port of this
 										* Session using this port may be already terminated, but since it is allocated in TopMemoryContext,
 										* its content is still valid and is used as template for ports of new sessions */
 
+static bool            IdleInTransactionSessionError;
+
 /* ----------------------------------------------------------------
  *		decls for routines only used in this file
  * ----------------------------------------------------------------
@@ -226,6 +228,7 @@ static void DeleteSession(SessionContext* session)
 	ReleaseSessionGUCs(session);
 	MemoryContextDelete(session->memory);
 	free(session);
+	on_shmem_exit_reset();
 }
 
 /* ----------------------------------------------------------------
@@ -3096,6 +3099,7 @@ ProcessInterrupts(void)
 			if (ActiveSession)
 			{
 				IdleInTransactionSessionTimeoutPending = false;
+				IdleInTransactionSessionError = true;
 				ereport(ERROR,
 						(errcode(ERRCODE_IDLE_IN_TRANSACTION_SESSION_TIMEOUT),
 						 errmsg("canceling current transaction due to idle-in-transaction timeout")));
@@ -4061,11 +4065,12 @@ PostgresMain(int argc, char *argv[],
 
 		if (ActiveSession)
 		{
-			if (IsAbortedTransactionBlockState())
+			if (IdleInTransactionSessionError || (IsAbortedTransactionBlockState() && pq_is_reading_msg()))
 			{
 				StartTransactionCommand();
 				UserAbortTransactionBlock();
 				CommitTransactionCommand();
+				IdleInTransactionSessionError = false;
 			}
 			if (pq_is_reading_msg())
 				goto CloseSession;
@@ -4162,7 +4167,7 @@ PostgresMain(int argc, char *argv[],
 			 * Here we perform multiplexing of client sessions if session pooling is enabled.
 			 * As far as we perform transaction level pooling, rescheduling is done only when we are not in transaction.
 			 */
-			if (SessionPoolSock != PGINVALID_SOCKET && !IsTransactionState() && pq_available_bytes() == 0)
+			if (SessionPoolSock != PGINVALID_SOCKET && !IsTransactionState() && !IsAbortedTransactionBlockState() && pq_available_bytes() == 0)
 			{
 				WaitEvent ready_client;
 				if (SessionPool == NULL)
@@ -4615,6 +4620,7 @@ PostgresMain(int argc, char *argv[],
 						DeleteSession(ActiveSession);
 						ActiveSession = NULL;
 					}
+					pq_reinit();
 					whereToSendOutput = DestRemote;
 					/* Need to perform rescheduling to some other session or accept new session */
 					goto ChooseSession;

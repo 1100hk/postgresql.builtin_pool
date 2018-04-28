@@ -3772,6 +3772,8 @@ GetTempTableNamespace(void)
 	{
 		if (!OidIsValid(ActiveSession->tempNamespace))
 			InitTempTableNamespace();
+		else
+			myTempNamespace = ActiveSession->tempNamespace;
 	}
 	else
 	{

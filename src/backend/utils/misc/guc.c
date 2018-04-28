@@ -5310,26 +5310,27 @@ AtEOXact_GUC(bool isCommit, int nestLevel)
 							sg->var = gconf;
 							sg->next = ActiveSession->gucs;
 							ActiveSession->gucs = sg;
+
+							switch (gconf->vartype)
+							{
+							  case PGC_BOOL:
+								sg->val.val.boolval = stack->prior.val.boolval;
+								break;
+							  case PGC_INT:
+								sg->val.val.intval = stack->prior.val.intval;
+								break;
+							  case PGC_REAL:
+								sg->val.val.realval = stack->prior.val.realval;
+								break;
+							  case PGC_STRING:
+								sg->val.val.stringval = stack->prior.val.stringval;
+								break;
+							  case PGC_ENUM:
+								sg->val.val.enumval = stack->prior.val.enumval;
+								break;
+							}
+							sg->val.extra = stack->prior.extra;
 						}
-						switch (gconf->vartype)
-						{
-						  case PGC_BOOL:
-							sg->val.val.boolval = stack->prior.val.boolval;
-							break;
-						  case PGC_INT:
-							sg->val.val.intval = stack->prior.val.intval;
-							break;
-						  case PGC_REAL:
-							sg->val.val.realval = stack->prior.val.realval;
-							break;
-						  case PGC_STRING:
-							sg->val.val.stringval = stack->prior.val.stringval;
-							break;
-						  case PGC_ENUM:
-							sg->val.val.enumval = stack->prior.val.enumval;
-							break;
-						}
-						sg->val.extra = stack->prior.extra;
 					}
 					else
 					{

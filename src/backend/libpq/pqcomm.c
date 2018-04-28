@@ -231,6 +231,16 @@ pq_init(void)
 	pq_create_backend_event_set();
 }
 
+void
+pq_reinit(void)
+{
+	PqSendPointer = PqSendStart = PqRecvPointer = PqRecvLength = 0;
+	PqCommBusy = false;
+	PqCommReadingMsg = false;
+	DoingCopyOut = false;
+}
+
+
 /* --------------------------------
  *		socket_comm_reset - reset libpq during error recovery
  *
