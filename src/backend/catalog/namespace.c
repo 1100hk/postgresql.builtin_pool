@@ -3922,6 +3922,11 @@ AtEOXact_Namespace(bool isCommit, bool parallel)
 		{
 			myTempNamespace = InvalidOid;
 			myTempToastNamespace = InvalidOid;
+			if (ActiveSession)
+			{
+				ActiveSession->tempNamespace = InvalidOid;
+			   	ActiveSession->tempToastNamespace = InvalidOid;
+  	  		}
 			baseSearchPathValid = false;	/* need to rebuild list */
 		}
 		myTempNamespaceSubID = InvalidSubTransactionId;

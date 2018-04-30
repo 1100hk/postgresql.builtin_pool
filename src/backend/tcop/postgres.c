@@ -4616,6 +4616,13 @@ PostgresMain(int argc, char *argv[],
 
 					if (ActiveSession)
 					{
+                        if (IsAbortedTransactionBlockState())
+                        {
+                            StartTransactionCommand();
+                            UserAbortTransactionBlock();
+							CommitTransactionCommand();
+                        }
+				
 						DropSessionPreparedStatements(ActiveSession->id);
 						DeleteSession(ActiveSession);
 						ActiveSession = NULL;
