@@ -1268,16 +1268,6 @@ exec_parse_message(const char *query_string,	/* string to execute */
 	bool		save_log_statement_stats = log_statement_stats;
 	char		msec_str[32];
 
-	if (ActiveSession && stmt_name[0] != '\0')
-	{
-		/* Make names of prepared statements unique for session in case of using internal session pool */
-		stmt_name = psprintf("%s.%s", ActiveSession->id, stmt_name);
-	}
-
-	/*
-	 * Report query to various monitoring facilities.
-	 */
-	debug_query_string = query_string;
 
 	pgstat_report_activity(STATE_RUNNING, query_string);
 
@@ -1544,12 +1534,6 @@ exec_bind_message(StringInfo input_message)
 	/* Get the fixed part of the message */
 	portal_name = pq_getmsgstring(input_message);
 	stmt_name = pq_getmsgstring(input_message);
-
-	if (ActiveSession && stmt_name[0] != '\0')
-	{
-		/* Make names of prepared statements unique for session in case of using internal session pool */
-		stmt_name = psprintf("%s.%s", ActiveSession->id, stmt_name);
-	}
 
 	ereport(DEBUG2,
 			(errmsg("bind %s to %s",
@@ -2372,12 +2356,6 @@ exec_describe_statement_message(const char *stmt_name)
 {
 	CachedPlanSource *psrc;
 	int			i;
-
-	if (ActiveSession && stmt_name[0] != '\0')
-	{
-		/* Make names of prepared statements unique for session in case of using internal session pool */
-		stmt_name = psprintf("%s.%s", ActiveSession->id, stmt_name);
-	}
 
 	/*
 	 * Start up a transaction command. (Note that this will normally change
@@ -4622,7 +4600,7 @@ PostgresMain(int argc, char *argv[],
                             UserAbortTransactionBlock();
 							CommitTransactionCommand();
                         }
-				
+
 						DropSessionPreparedStatements(ActiveSession->id);
 						DeleteSession(ActiveSession);
 						ActiveSession = NULL;

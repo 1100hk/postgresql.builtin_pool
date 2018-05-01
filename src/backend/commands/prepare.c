@@ -35,6 +35,7 @@
 #include "utils/builtins.h"
 #include "utils/snapmgr.h"
 #include "utils/timestamp.h"
+#include "storage/proc.h"
 
 
 /*
@@ -443,6 +444,12 @@ InitQueryHashTable(void)
 								   HASH_ELEM);
 }
 
+static char const*
+get_session_name(char const* stmt_name)
+{
+	return ActiveSession ? psprintf("%s.%s", ActiveSession->id, stmt_name) : stmt_name;
+}
+
 /*
  * Store all the data pertaining to a query in the hash table using
  * the specified key.  The passed CachedPlanSource should be "unsaved"
@@ -464,7 +471,7 @@ StorePreparedStatement(const char *stmt_name,
 
 	/* Add entry to hash table */
 	entry = (PreparedStatement *) hash_search(prepared_queries,
-											  stmt_name,
+											  get_session_name(stmt_name),
 											  HASH_ENTER,
 											  &found);
 
@@ -502,7 +509,7 @@ FetchPreparedStatement(const char *stmt_name, bool throwError)
 	 */
 	if (prepared_queries)
 		entry = (PreparedStatement *) hash_search(prepared_queries,
-												  stmt_name,
+												  get_session_name(stmt_name),
 												  HASH_FIND,
 												  NULL);
 	else
