@@ -4246,6 +4246,7 @@ PostgresMain(int argc, char *argv[],
 							StartTransactionCommand();
 							PerformAuthentication(MyProcPort);
 							CommitTransactionCommand();
+							SetTempNamespaceState(InvalidOid, InvalidOid);
 
 							/*
 							 * Send GUC options to the client

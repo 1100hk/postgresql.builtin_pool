@@ -5148,8 +5148,14 @@ void
 RestoreSessionGUCs(SessionContext* session)
 {
 	SessionGUC* sg;
+	bool save_reporting_enabled;
+	
 	if (session == NULL)
 		return;
+
+	save_reporting_enabled = reporting_enabled;
+	reporting_enabled = false;
+
 	for (sg = session->gucs; sg != NULL; sg = sg->next)
 	{
 		void* old_extra = sg->var->extra;
@@ -5209,6 +5215,7 @@ RestoreSessionGUCs(SessionContext* session)
 		}
 		sg->val.extra = old_extra;
 	}
+	reporting_enabled = save_reporting_enabled;
 }
 
 /*
