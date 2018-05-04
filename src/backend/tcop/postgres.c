@@ -4571,7 +4571,7 @@ PostgresMain(int argc, char *argv[],
 				 * scenarios.
 				 */
 
-				if (SessionPool)
+				if (SessionPool && (strcmp(MyProcPort->database_name, "postgres") != 0 || SessionCount > 1))
 				{
 				  CloseSession:
 					/* In case of session pooling close the session, but do not terminate the backend

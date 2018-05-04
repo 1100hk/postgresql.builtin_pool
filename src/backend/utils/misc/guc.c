@@ -1889,7 +1889,7 @@ static struct config_int ConfigureNamesInt[] =
 						 "Launched backend are never terminated even in case of no active sessions.")
 		},
 		&SessionPoolSize,
-		0, 0, INT_MAX,
+		10, 0, INT_MAX,
 		NULL, NULL, NULL
 	},
 

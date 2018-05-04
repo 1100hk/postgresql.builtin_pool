@@ -178,9 +178,9 @@ typedef struct bkend
 	 */
 	int			bkend_type;
 	bool		dead_end;		/* is it going to send an error and quit? */
-	bool		bgworker_notify;	/* gets bgworker start/stop notifications */
+	bool		bgworker_notify;/* gets bgworker start/stop notifications */
 	dlist_node	elem;			/* list link in BackendList */
-	int         session_pool_id;    /* identifier of backends session pool */
+	int         session_pool_id;/* identifier of backends session pool */
 	int         worker_id;      /* identifier of worker within session pool */
 } Backend;
 
@@ -3273,6 +3273,7 @@ static void UnlinkBackend(Backend* bp)
 		if (--pool->n_workers != 0)
 		{
 			pool->workers[bp->worker_id] = pool->workers[pool->n_workers];
+			pool->workers[bp->worker_id]->worker_id = bp->worker_id;
 			pool->rr_index %= pool->n_workers;
 		}
 		closesocket(bp->session_send_sock);
