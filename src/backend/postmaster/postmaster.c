@@ -3277,8 +3277,14 @@ static void UnlinkBackend(Backend* bp)
 			pool->rr_index %= pool->n_workers;
 		}
 		closesocket(bp->session_send_sock);
+		bp->session_send_sock = PGINVALID_SOCKET;
 		elog(DEBUG2, "Cleanup backend %d", bp->pid);
 	}
+}
+
+static void DeleteBackend(Backend* bp)
+{
+	UnlinkBackend(bp);
 	dlist_delete(&bp->elem);
 	free(bp);
 }
@@ -3360,7 +3366,7 @@ CleanupBackend(int pid,
 				 */
 				BackgroundWorkerStopNotifications(bp->pid);
 			}
-			UnlinkBackend(bp);
+			DeleteBackend(bp);
 			break;
 		}
 	}
@@ -3462,7 +3468,7 @@ HandleChildCrash(int pid, int exitstatus, const char *procname)
 				ShmemBackendArrayRemove(bp);
 #endif
 			}
-			UnlinkBackend(bp);
+			DeleteBackend(bp);
 			/* Keep looping so we can signal remaining backends */
 		}
 		else
@@ -4069,17 +4075,24 @@ BackendStartup(Port *port, int session_pool_id)
 
 	if (!dedicated_backend && pool->n_workers >= SessionPoolSize)
 	{
-		Backend* worker = pool->workers[pool->rr_index];
 		/* In case of session pooling instead of spawning new backend open new session at one of the existed backends. */
-		elog(DEBUG2, "Start new session in pool %d for socket %d at backend %d",
-			 session_pool_id, port->sock, worker->pid);
-		/* Send connection socket to the worker backend */
-		if (pg_send_sock(worker->session_send_sock, port->sock, worker->pid) < 0)
-			elog(FATAL, "Failed to send session socket: %m");
+		while (true)
+		{
+			Backend* worker = pool->workers[pool->rr_index];
+			pool->rr_index = (pool->rr_index + 1) % pool->n_workers; /* round-robin */
 
-		pool->rr_index = (pool->rr_index + 1) % pool->n_workers; /* round-robin */
+			/* Send connection socket to the worker backend */
+			if (pg_send_sock(worker->session_send_sock, port->sock, worker->pid) < 0)
+			{
+				elog(LOG, "Failed to send session socket: %m");
+				UnlinkBackend(worker);
+				continue;
+			}
+			elog(DEBUG2, "Start new session in pool %d for socket %d at backend %d",
+				 session_pool_id, port->sock, worker->pid);
 
-		return STATUS_OK;
+			return STATUS_OK;
+		}
 	}
 
 

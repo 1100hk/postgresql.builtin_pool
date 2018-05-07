@@ -3696,6 +3696,14 @@ PostgresMain(int argc, char *argv[],
 							progname)));
 	}
 
+	/* Serve all conections to "postgres" database by dedicated backends */
+	if (SessionPoolSize != 0 && strcmp(dbname, "postgres") == 0)
+	{
+		elog(LOG, "Backend is dedicated");
+		SessionPoolSize = 0;
+		closesocket(SessionPoolSock);
+		SessionPoolSock = PGINVALID_SOCKET;
+	}
 	/* Assign session for this backend in case of session pooling */
 	if (SessionPoolSize != 0)
 	{
@@ -4223,12 +4231,12 @@ PostgresMain(int argc, char *argv[],
 					 * TODO: Currently we assume that all sessions are accessing the same database under the same user.
 					 * Just report an error if  it is not true
 					 */
-					if (strcmp(port->database_name, MyProcPort->database_name) ||
-						strcmp(port->user_name, MyProcPort->user_name))
+					if (strcmp(port->database_name, BackendPort->database_name) ||
+						strcmp(port->user_name, BackendPort->user_name))
 					{
 						elog(FATAL, "Failed to open session (dbname=%s user=%s) in backend %d (dbname=%s user=%s)",
 							 port->database_name, port->user_name,
-							 MyProcPid, MyProcPort->database_name, MyProcPort->user_name);
+							 MyProcPid, BackendPort->database_name, BackendPort->user_name);
 					}
 					else if (status == STATUS_OK)
 					{
@@ -4571,7 +4579,7 @@ PostgresMain(int argc, char *argv[],
 				 * scenarios.
 				 */
 
-				if (SessionPool && (strcmp(MyProcPort->database_name, "postgres") != 0 || SessionCount > 1))
+				if (SessionPool)
 				{
 				  CloseSession:
 					/* In case of session pooling close the session, but do not terminate the backend
