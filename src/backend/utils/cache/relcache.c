@@ -74,6 +74,7 @@
 #include "rewrite/rewriteDefine.h"
 #include "rewrite/rowsecurity.h"
 #include "storage/lmgr.h"
+#include "storage/proc.h"
 #include "storage/smgr.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
@@ -2059,6 +2060,13 @@ RelationIdGetRelation(Oid relationId)
 				RelationClearRelation(rd, true);
 			Assert(rd->rd_isvalid);
 		}
+		/*
+		 * In case of session pooling, relation descriptor can be constructed by some other session,
+		 * so we need to recheck rd_islocaltemp value
+		 */
+		if (ActiveSession && RELATION_IS_OTHER_TEMP(rd) && isTempOrTempToastNamespace(rd->rd_rel->relnamespace))
+			rd->rd_islocaltemp = true;
+
 		return rd;
 	}
 

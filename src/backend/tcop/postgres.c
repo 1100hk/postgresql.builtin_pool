@@ -3986,7 +3986,8 @@ PostgresMain(int argc, char *argv[],
 		pq_comm_reset();
 
 		/* Report the error to the client and/or server log */
-		EmitErrorReport();
+		if (MyProcPort)
+			EmitErrorReport();
 
 		/*
 		 * Make sure debug_query_string gets reset before we possibly clobber
