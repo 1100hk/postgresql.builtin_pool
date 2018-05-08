@@ -4073,21 +4073,20 @@ BackendStartup(Port *port, int session_pool_id)
 	PostmasterSessionPool* pool = &SessionPools[session_pool_id];
 	bool dedicated_backend = SessionPoolSize == 0 || (SessionPoolPorts != 0 && session_pool_id == 0);
 
-	if (!dedicated_backend && pool->n_workers >= SessionPoolSize)
+	/* In case of session pooling instead of spawning new backend open new session at one of the existed backends. */
+	while (!dedicated_backend && pool->n_workers >= SessionPoolSize)
 	{
-		/* In case of session pooling instead of spawning new backend open new session at one of the existed backends. */
-		while (true)
-		{
-			Backend* worker = pool->workers[pool->rr_index];
-			pool->rr_index = (pool->rr_index + 1) % pool->n_workers; /* round-robin */
+		Backend* worker = pool->workers[pool->rr_index];
+		pool->rr_index = (pool->rr_index + 1) % pool->n_workers; /* round-robin */
 
-			/* Send connection socket to the worker backend */
-			if (pg_send_sock(worker->session_send_sock, port->sock, worker->pid) < 0)
-			{
-				elog(LOG, "Failed to send session socket: %m");
-				UnlinkBackend(worker);
-				continue;
-			}
+		/* Send connection socket to the worker backend */
+		if (pg_send_sock(worker->session_send_sock, port->sock, worker->pid) < 0)
+		{
+			elog(LOG, "Failed to send session socket: %m");
+			UnlinkBackend(worker);
+		}
+		else
+		{
 			elog(DEBUG2, "Start new session in pool %d for socket %d at backend %d",
 				 session_pool_id, port->sock, worker->pid);
 

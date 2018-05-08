@@ -317,7 +317,7 @@ extern int	StatementTimeout;
 extern int	LockTimeout;
 extern int	IdleInTransactionSessionTimeout;
 extern bool log_lock_waits;
-
+extern bool IsDedicatedBackend;
 
 /*
  * Function Prototypes

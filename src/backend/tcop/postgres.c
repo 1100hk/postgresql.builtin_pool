@@ -103,7 +103,7 @@ int			PostAuthDelay = 0;
 pgsocket    SessionPoolSock = PGINVALID_SOCKET;
 /* Pointer to the active session */
 SessionContext* ActiveSession;
-
+bool        IsDedicatedBackend;
 
 /* ----------------
  *		private variables
@@ -179,7 +179,7 @@ static int64           SessionCount;   /* Number of sessions */
 static Port*           BackendPort;    /* Reference to the original port of this backend created when this backend was launched.
 										* Session using this port may be already terminated, but since it is allocated in TopMemoryContext,
 										* its content is still valid and is used as template for ports of new sessions */
-
+static int             nPooledSessions;/* Number of pooled sessions in this backend */
 static bool            IdleInTransactionSessionError;
 
 /* ----------------------------------------------------------------
@@ -214,6 +214,7 @@ static char* CreateSessionId(void)
 {
 	char buf[64];
 	pg_lltoa(++SessionCount, buf);
+	nPooledSessions += 1;
 	return pstrdup(buf);
 }
 
@@ -223,6 +224,7 @@ static char* CreateSessionId(void)
 static void DeleteSession(SessionContext* session)
 {
 	elog(DEBUG1, "Delete session %p, id=%s,  memory context=%p", session, session->id, session->memory);
+	nPooledSessions -= 1;
 	FreeWaitEventSet(session->eventSet);
 	RestoreSessionGUCs(session);
 	ReleaseSessionGUCs(session);
@@ -4580,7 +4582,7 @@ PostgresMain(int argc, char *argv[],
 				 * scenarios.
 				 */
 
-				if (SessionPool)
+				if (SessionPool && (!IsDedicatedBackend || SessionCount > 1))
 				{
 				  CloseSession:
 					/* In case of session pooling close the session, but do not terminate the backend
