@@ -2962,7 +2962,7 @@ ProcessInterrupts(void)
 		LockErrorCleanup();
 		/* don't send to client, we already know the connection to be dead. */
 		whereToSendOutput = DestNone;
-		ereport(FATAL,
+		ereport(ActiveSession ? ERROR : FATAL,
 				(errcode(ERRCODE_CONNECTION_FAILURE),
 				 errmsg("connection to client lost")));
 	}
