@@ -575,6 +575,8 @@ const char *const config_group_names[] =
 	gettext_noop("Connections and Authentication / Connection Settings"),
 	/* CONN_AUTH_SECURITY */
 	gettext_noop("Connections and Authentication / Security and Authentication"),
+	/* CONN_POOLING */
+	gettext_noop("Connections and Authentication / Connection Pooling"),
 	/* RESOURCES */
 	gettext_noop("Resource Usage"),
 	/* RESOURCES_MEM */
@@ -1137,6 +1139,16 @@ static struct config_bool ConfigureNamesBool[] =
 		},
 		&restart_after_crash,
 		true,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"restart_pooler_on_reload", PGC_SIGHUP, CONN_POOLING,
+		 gettext_noop("Restart session pool workers on pg_reload_conf()."),
+		 NULL,
+		},
+		&RestartPoolerOnReload,
+		false,
 		NULL, NULL, NULL
 	},
 
@@ -1871,7 +1883,7 @@ static struct config_int ConfigureNamesInt[] =
 	},
 
 	{
-		{"max_sessions", PGC_POSTMASTER, CONN_AUTH_SETTINGS,
+		{"max_sessions", PGC_POSTMASTER, CONN_POOLING,
 			gettext_noop("Sets the maximum number of client session."),
 			gettext_noop("Maximal number of client sessions which can be handled by one backend if session pooling is switched on. "
 						 "So maximal number of client connections is session_pool_size*max_sessions")
@@ -1882,7 +1894,7 @@ static struct config_int ConfigureNamesInt[] =
 	},
 
 	{
-		{"session_pool_size", PGC_POSTMASTER, CONN_AUTH_SETTINGS,
+		{"session_pool_size", PGC_POSTMASTER, CONN_POOLING,
 			gettext_noop("Sets number of backends serving client sessions."),
 			gettext_noop("If non-zero then session pooling will be used: "
 						 "client connections will be redirected to one of the backends and maximal number of backends is determined by this parameter."
@@ -1894,7 +1906,7 @@ static struct config_int ConfigureNamesInt[] =
 	},
 
 	{
-		{"session_pool_ports", PGC_POSTMASTER, CONN_AUTH_SETTINGS,
+		{"session_pool_ports", PGC_POSTMASTER, CONN_POOLING,
 		 gettext_noop("Number of session ports = number of session pools."),
 		 gettext_noop("Number of extra ports which PostgreSQL will listen to accept client session. Each such port has separate session pool."
 					  "It is intended that each port corresponds to some particular database/user combination, so that all backends in this session "
