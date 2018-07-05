@@ -3666,7 +3666,7 @@ IsDedicatedDatabase(char const* dbname)
 	foreach(l, namelist)
 	{
 		char *curname = (char *) lfirst(l);
-		if (strcmp(curname, dbname))
+		if (strcmp(curname, dbname) == 0)
 		{
 			found = true;
 			break;
