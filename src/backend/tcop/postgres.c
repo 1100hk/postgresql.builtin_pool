@@ -60,7 +60,7 @@
 #include "replication/logicalworker.h"
 #include "replication/slot.h"
 #include "replication/walsender.h"
-#include "rewrite/rewriteHandler.h"\
+#include "rewrite/rewriteHandler.h"
 #include "storage/bufmgr.h"
 #include "storage/ipc.h"
 #include "storage/proc.h"
