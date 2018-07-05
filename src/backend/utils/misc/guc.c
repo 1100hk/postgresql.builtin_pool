@@ -3195,14 +3195,13 @@ static struct config_string ConfigureNamesString[] =
 	},
 
 	{
-		{"temp_tablespaces", PGC_USERSET, CLIENT_CONN_STATEMENT,
-			gettext_noop("Sets the tablespace(s) to use for temporary tables and sort files."),
+		{"dedicated_databases", PGC_USERSET, CONN_POOLING,
+			gettext_noop("Set of databases for which session pooling is disabled."),
 			NULL,
 			GUC_LIST_INPUT | GUC_LIST_QUOTE
 		},
-		&temp_tablespaces,
-		"",
-		check_temp_tablespaces, assign_temp_tablespaces, NULL
+		&DedicatedDatabases,
+		"postgres"
 	},
 
 	{

@@ -60,7 +60,7 @@
 #include "replication/logicalworker.h"
 #include "replication/slot.h"
 #include "replication/walsender.h"
-#include "rewrite/rewriteHandler.h"
+#include "rewrite/rewriteHandler.h"\
 #include "storage/bufmgr.h"
 #include "storage/ipc.h"
 #include "storage/proc.h"
@@ -77,6 +77,7 @@
 #include "utils/timeout.h"
 #include "utils/timestamp.h"
 #include "utils/builtins.h"
+#include "utils/varlena.h"
 #include "mb/pg_wchar.h"
 
 /* ----------------
@@ -3648,6 +3649,35 @@ process_postgres_switches(int argc, char *argv[], GucContext ctx,
 #endif
 }
 
+static bool
+IsDedicatedDatabase(char const* dbname)
+{
+	List       *namelist;
+	ListCell   *l;
+	char       *databases;
+	bool       found = false;
+
+    /* Need a modifiable copy of namespace_search_path string */
+	databases = pstrdup(DedicatedDatabases);
+
+	if (!SplitIdentifierString(databases, ',', &namelist)) {
+		elog(ERROR, "invalid list syntax");
+	}
+	foreach(l, namelist)
+	{
+		char *curname = (char *) lfirst(l);
+		if (strcmp(curname, dbname))
+		{
+			found = true;
+			break;
+		}
+	}
+	list_free(namelist);
+	pfree(databases);
+
+	return found;
+}
+
 /* ----------------------------------------------------------------
  * PostgresMain
  *	   postgres main loop -- all backends, interactive or otherwise start here
@@ -3699,7 +3729,7 @@ PostgresMain(int argc, char *argv[],
 	}
 
 	/* Serve all conections to "postgres" database by dedicated backends */
-	if (SessionPoolSize != 0 && strcmp(dbname, "postgres") == 0)
+	if (SessionPoolSize != 0 && IsDedicatedDatabase(dbname))
 	{
 		elog(LOG, "Backend is dedicated");
 		SessionPoolSize = 0;

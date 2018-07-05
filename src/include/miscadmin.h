@@ -151,6 +151,7 @@ extern PGDLLIMPORT bool IsBackgroundWorker;
 extern PGDLLIMPORT bool IsBinaryUpgrade;
 
 extern PGDLLIMPORT bool RestartPoolerOnReload;
+extern PGDLLIMPORT char* DedicatedDatabases;
 
 extern PGDLLIMPORT bool ExitOnAnyError;
 
